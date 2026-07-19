@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#13231a" />
+    <title>话题雷达 · 智能监控 CRM</title>
+    <meta name="description" content="酷安话题智能监控与 AI 通知工作台" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/vendor/phosphor/regular/style.css" />
+    <link rel="stylesheet" href="/vendor/phosphor/bold/style.css" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="crm-shell">
+      <aside class="crm-sidebar">
+        <a class="brand" href="/" aria-label="话题雷达首页">
+          <span class="brand-mark"><i class="ph ph-broadcast"></i></span>
+          <span><strong>话题雷达</strong><small>INTELLIGENCE CRM</small></span>
+        </a>
+
+        <nav class="primary-nav" aria-label="主导航">
+          <button class="active" id="openDashboardSidebar" data-view-link="dashboard" type="button"><i class="ph ph-squares-four"></i><span>监控工作台</span></button>
+          <button id="openAiCenterSidebar" data-view-link="ai" type="button"><i class="ph ph-sparkle"></i><span>AI 命中记录</span><b id="matchCount" hidden>0</b></button>
+          <button id="sidebarSearch" data-view-link="add" type="button"><i class="ph ph-broadcast"></i><span>添加监控</span></button>
+          <button id="openSettingsSidebar" data-view-link="settings" type="button"><i class="ph ph-gear-six"></i><span>系统设置</span></button>
+        </nav>
+
+        <div class="sidebar-section-head"><span>监控话题</span><button id="manageTopics" type="button" aria-label="添加监控话题"><i class="ph ph-plus"></i></button></div>
+        <nav id="topicList" class="topic-list" aria-label="监控话题"></nav>
+
+        <div class="sidebar-account">
+          <span class="account-avatar"><i class="ph ph-user"></i></span>
+          <span><strong>本地管理员</strong><small><i class="online-dot"></i> 服务运行中</small></span>
+        </div>
+      </aside>
+
+      <section class="crm-main">
+        <header class="crm-topbar">
+          <div class="breadcrumb"><span>监控中心</span><i class="ph ph-caret-right"></i><strong id="breadcrumbCurrent">动态看板</strong></div>
+          <form class="global-search" id="searchForm">
+            <button class="global-search-submit" type="submit" aria-label="搜索话题"><i class="ph ph-magnifying-glass"></i></button>
+            <input id="searchInput" type="search" autocomplete="off" placeholder="搜索并添加话题或产品" aria-label="搜索酷安内容" />
+            <kbd>⌘ K</kbd>
+          </form>
+          <div class="top-actions">
+            <span class="sync-status"><i class="status-dot"></i><span id="syncText">每 5 分钟更新</span></span>
+            <button class="icon-action" id="openAiCenter" type="button" aria-label="AI 命中记录"><i class="ph ph-bell"></i></button>
+            <button class="icon-action" id="openSettings" type="button" aria-label="系统设置"><i class="ph ph-gear-six"></i></button>
+          </div>
+        </header>
+
+        <main class="crm-content">
+          <section class="crm-view active" id="dashboardView" data-view="dashboard">
+            <section class="page-heading">
+              <div><p>TOPIC MONITORING</p><h1>监控工作台</h1><span>集中管理话题、最新动态、AI 判断与通知结果。</span></div>
+              <div class="page-actions">
+                <button class="secondary-action" id="refreshAll" type="button"><i class="ph ph-arrow-clockwise"></i>刷新数据</button>
+                <button class="primary-action" id="showSearch" type="button"><i class="ph ph-plus"></i>添加监控话题</button>
+              </div>
+            </section>
+
+            <section class="metric-grid" aria-label="监控概览">
+              <article><span class="metric-icon green"><i class="ph ph-broadcast"></i></span><div><small>监控话题</small><strong id="metricTopics">0</strong><p>持续轮询中的话题</p></div></article>
+              <article><span class="metric-icon blue"><i class="ph ph-article"></i></span><div><small>最新动态</small><strong id="metricFeeds">0</strong><p>当前缓存的内容</p></div></article>
+              <article><span class="metric-icon amber"><i class="ph ph-sparkle"></i></span><div><small>AI 命中</small><strong id="metricMatches">0</strong><p>符合关注意图</p></div></article>
+              <article><span class="metric-icon violet"><i class="ph ph-clock-countdown"></i></span><div><small>下次更新</small><strong id="metricUpdated">--:--</strong><p>后台自动抓取</p></div></article>
+            </section>
+
+            <section class="data-panel">
+              <header class="feed-header" id="feedHeader"></header>
+              <div class="table-toolbar">
+                <label class="table-search"><i class="ph ph-magnifying-glass"></i><input id="feedFilter" type="search" placeholder="筛选当前动态" /></label>
+                <div class="toolbar-filters"><button id="matchedFilter" type="button"><i class="ph ph-funnel"></i><span>全部状态</span></button><button id="sortOrder" type="button"><i class="ph ph-arrows-down-up"></i><span>最新发布</span></button></div>
+              </div>
+              <div class="feed-table-head" aria-hidden="true"><span>动态内容</span><span>所属话题</span><span>互动数据</span><span>AI 判断</span><span>发布时间</span><span></span></div>
+              <div class="feed-list" id="feedList" aria-live="polite"></div>
+              <footer class="feed-footer"><span id="feedCount">等待加载内容</span><span><i class="ph ph-check-circle"></i> 数据已同步</span></footer>
+            </section>
+          </section>
+
+          <section class="crm-view" id="addView" data-view="add" hidden>
+            <section class="page-heading subpage-heading">
+              <div><p>ADD A WATCH</p><h1>添加监控话题</h1><span>先搜索酷安公开话题，再从真实结果中加入监控。</span></div>
+              <button class="secondary-action" type="button" data-return-dashboard><i class="ph ph-arrow-left"></i>返回工作台</button>
+            </section>
+            <section class="workspace-page-card search-page-card">
+              <header class="workspace-page-head">
+                <span class="page-feature-icon"><i class="ph ph-magnifying-glass"></i></span>
+                <div><h2>查找公开话题</h2><p>支持话题全称或关键词，例如“数码”“薅羊毛”“优惠”。</p></div>
+              </header>
+              <form class="dialog-search-form page-search-form" id="dialogSearchForm">
+                <i class="ph ph-magnifying-glass"></i><input id="dialogSearchInput" type="search" autocomplete="off" placeholder="输入话题或数码产品关键词" /><button type="submit">搜索</button>
+              </form>
+              <div class="quick-searches"><span>常用搜索</span><button type="button" data-search-keyword="数码">数码</button><button type="button" data-search-keyword="薅羊毛">薅羊毛</button><button type="button" data-search-keyword="优惠">优惠</button><button type="button" data-search-keyword="苹果">苹果</button></div>
+              <div class="search-guidance"><i class="ph ph-info"></i><span>系统会自动识别酷安话题与数码产品，并使用各自对应的动态接口持续抓取。</span></div>
+              <div class="search-results page-search-results" id="searchResults"><div class="page-empty-state compact"><span><i class="ph ph-broadcast"></i></span><h3>搜索一个内容源开始监控</h3><p>输入话题全称或产品关键词，系统会返回可持续抓取的酷安内容。</p></div></div>
+            </section>
+          </section>
+
+          <section class="crm-view" id="aiView" data-view="ai" hidden>
+            <section class="page-heading subpage-heading">
+              <div><p>MATCH HISTORY</p><h1>AI 命中记录</h1><span>集中查看判断理由、置信度与飞书投递状态。</span></div>
+              <button class="secondary-action" type="button" data-return-dashboard><i class="ph ph-arrow-left"></i>返回工作台</button>
+            </section>
+            <section class="sub-metric-grid" aria-label="AI 判断概览">
+              <article><span><i class="ph ph-files"></i></span><div><small>全部判断</small><strong id="aiMetricTotal">0</strong></div></article>
+              <article><span class="green"><i class="ph ph-check-circle"></i></span><div><small>符合意图</small><strong id="aiMetricMatched">0</strong></div></article>
+              <article><span class="blue"><i class="ph ph-paper-plane-tilt"></i></span><div><small>已发送通知</small><strong id="aiMetricNotified">0</strong></div></article>
+            </section>
+            <section class="workspace-page-card ai-page-card">
+              <header class="workspace-page-head">
+                <span class="page-feature-icon amber"><i class="ph ph-sparkle"></i></span>
+                <div><h2>内容判断流水</h2><p>数据按最新判断时间排列，可切换全部结果与仅命中。</p></div>
+              </header>
+              <div class="ai-history-filters"><button class="active" type="button" data-history-filter="matched">仅命中</button><button type="button" data-history-filter="all">全部判断</button></div>
+              <div class="ai-history page-ai-history" id="aiHistory"></div>
+            </section>
+          </section>
+
+          <section class="crm-view" id="settingsView" data-view="settings" hidden>
+            <section class="page-heading subpage-heading">
+              <div><p>SYSTEM CONFIGURATION</p><h1>系统设置</h1><span>配置 AI 内容识别和飞书通知，密钥始终由服务端保存。</span></div>
+              <button class="secondary-action" type="button" data-return-dashboard><i class="ph ph-arrow-left"></i>返回工作台</button>
+            </section>
+            <section class="workspace-page-card settings-page-card">
+              <header class="workspace-page-head">
+                <span class="page-feature-icon"><i class="ph ph-sliders-horizontal"></i></span>
+                <div><h2>集成配置</h2><p>先完成连接参数，再按话题配置具体的 AI 关注意图。</p></div>
+              </header>
+              <form id="settingsForm" class="settings-form page-settings-form">
+                <section class="settings-section">
+                  <div class="settings-section-title"><span class="settings-icon"><i class="ph ph-sparkle"></i></span><div><h3>AI 内容识别</h3><p>支持 OpenAI 与 OpenAI 兼容接口，对新帖子进行语义与图片联合判断。</p></div><label class="switch"><input id="aiEnabled" type="checkbox" /><span></span></label></div>
+                  <div class="form-grid">
+                    <label class="field field-wide"><span>API 地址</span><input id="aiBaseUrl" type="url" autocomplete="off" placeholder="https://api.openai.com/v1" /></label>
+                    <label class="field"><span>模型</span><input id="aiModel" type="text" autocomplete="off" placeholder="gpt-5.6-luna" /></label>
+                    <label class="field"><span>接口协议</span><select id="aiApiMode"><option value="auto">自动识别（推荐）</option><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></select></label>
+                    <label class="field"><span>推理强度</span><select id="aiReasoning"><option value="none">无</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+                    <label class="field field-wide"><span>API Key <small id="apiKeyHint"></small></span><input id="aiApiKey" type="password" autocomplete="new-password" placeholder="留空表示保留现有密钥" /></label>
+                    <label class="field"><span>默认命中阈值</span><input id="aiThreshold" type="number" min="0.1" max="1" step="0.01" /></label>
+                    <label class="check-field"><input id="aiIncludeImages" type="checkbox" /><span>识别帖子图片中的价格和商品信息（模型不支持图片时自动采用文本判断）</span></label>
+                  </div>
+                  <div class="integration-actions"><button class="secondary-button" id="testAi" type="button"><i class="ph ph-plugs-connected"></i>测试 AI 连接</button><span id="aiTestStatus"></span></div>
+                </section>
+                <section class="settings-section">
+                  <div class="settings-section-title"><span class="settings-icon feishu"><i class="ph ph-paper-plane-tilt"></i></span><div><h3>飞书通知</h3><p>AI 命中关注意图后，通过 V2 自定义机器人推送。</p></div><label class="switch"><input id="feishuEnabled" type="checkbox" /><span></span></label></div>
+                  <div class="form-grid">
+                    <label class="field field-wide"><span>Webhook <small id="webhookHint"></small></span><input id="feishuWebhook" type="password" autocomplete="new-password" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." /></label>
+                    <label class="field field-wide"><span>签名密钥（可选） <small id="secretHint"></small></span><input id="feishuSecret" type="password" autocomplete="new-password" placeholder="留空表示保留现有密钥" /></label>
+                  </div>
+                  <div class="integration-actions"><button class="secondary-button" id="testFeishu" type="button"><i class="ph ph-paper-plane-tilt"></i>发送测试通知</button><span id="feishuTestStatus"></span></div>
+                </section>
+                <footer class="panel-dialog-actions page-form-actions"><span id="settingsSaveStatus"></span><button class="ghost-button" type="button" data-return-dashboard>返回</button><button class="primary-button" type="submit"><i class="ph ph-check"></i>保存设置</button></footer>
+              </form>
+            </section>
+          </section>
+        </main>
+      </section>
+    </div>
+
+    <dialog class="detail-modal" id="detailDialog">
+      <header class="detail-modal-header">
+        <div><span class="panel-kicker">FEED RECORD</span><h2>动态详情</h2><p id="detailTopicName">查看完整内容与评论记录</p></div>
+        <button id="closeDetail" type="button" aria-label="关闭详情"><i class="ph ph-x"></i></button>
+      </header>
+      <div class="detail-content" id="detailContent"><div class="detail-loading">正在获取详情和评论…</div></div>
+    </dialog>
+
+    <dialog class="panel-dialog rule-dialog" id="ruleDialog">
+      <header class="panel-dialog-head">
+        <div><span class="panel-kicker">TOPIC INTELLIGENCE</span><h2>AI 关注意图</h2><p id="ruleTopicName">为当前话题定义真正值得提醒的内容。</p></div>
+        <button type="button" data-close-dialog="ruleDialog" aria-label="关闭 AI 规则"><i class="ph ph-x"></i></button>
+      </header>
+      <form id="ruleForm" class="rule-form">
+        <label class="rule-toggle"><span><strong>启用当前话题的 AI 筛选</strong><small>只分析之后抓取的新帖子，避免历史内容集中通知。</small></span><span class="switch"><input id="ruleEnabled" type="checkbox" /><span></span></span></label>
+        <label class="field"><span>你真正想关注什么？</span><textarea id="ruleIntent" rows="6" maxlength="1200" placeholder="例如：只关注价格明显低于市场价的数码商品，尤其是电商平台临时 Bug 价、叠券异常价；排除求购、回收、广告和普通优惠。"></textarea><small class="field-help">写清商品、价格条件和排除项可显著降低误报。</small></label>
+        <div class="form-grid compact"><label class="field"><span>话题命中阈值</span><input id="ruleThreshold" type="number" min="0.1" max="1" step="0.01" placeholder="使用全局阈值" /></label><label class="check-field"><input id="ruleNotify" type="checkbox" /><span>命中后发送飞书通知</span></label></div>
+        <footer class="panel-dialog-actions"><span id="ruleSaveStatus"></span><button class="secondary-button" id="analyzeCurrent" type="button"><i class="ph ph-play"></i>分析当前 10 条</button><button class="primary-button" type="submit"><i class="ph ph-check"></i>保存规则</button></footer>
+      </form>
+    </dialog>
+
+    <dialog class="lightbox" id="lightbox">
+      <header><span id="lightboxCaption">查看图片</span><div><button id="zoomOut" type="button" aria-label="缩小"><i class="ph ph-minus"></i></button><button id="zoomReset" type="button">100%</button><button id="zoomIn" type="button" aria-label="放大"><i class="ph ph-plus"></i></button><button id="closeLightbox" type="button" aria-label="关闭图片"><i class="ph ph-x"></i></button></div></header>
+      <div class="lightbox-stage" id="lightboxStage"><img id="lightboxImage" alt="放大的动态图片" /></div>
+    </dialog>
+
+    <div class="toast-region" id="toastRegion" aria-live="assertive"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

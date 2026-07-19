@@ -1,0 +1,10 @@
+data/state.json
+data/state.json.tmp
+data/settings.json
+data/settings.json.tmp
+node_modules/
+.env
+.env.*
+qa-*.png
+public/qa-*.png
+*.log

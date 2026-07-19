@@ -1,0 +1,83 @@
+# 话题雷达
+
+面向长期运行的酷安话题监控工作台。服务每 5 分钟获取每个话题最新 10 条动态，可按话题配置自然语言关注意图，由 AI 结合正文和图片判断是否命中，并把高置信度结果推送到飞书。
+
+## 运行
+
+需要 Node.js 20 或更高版本：
+
+```powershell
+cd monitor-web
+npm install
+npm start
+```
+
+打开 `http://localhost:4173`。前端“系统设置”可配置 AI 和飞书；密钥只写入服务端 `data/settings.json`，读取设置接口只返回掩码和配置状态。
+
+### 环境变量
+
+生产环境建议用环境变量注入密钥，它们的优先级高于页面保存值：
+
+```powershell
+$env:PORT=4173
+$env:POLL_INTERVAL_MS=300000
+$env:OPENAI_API_KEY="OPENAI_API_KEY"
+$env:OPENAI_BASE_URL="https://api.openai.com/v1"
+$env:OPENAI_MODEL="gpt-5.6-luna"
+$env:FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/TOKEN"
+$env:FEISHU_WEBHOOK_SECRET="SIGNING_SECRET"
+npm start
+```
+
+## 使用流程
+
+1. 点击“添加监控话题”，搜索或直接输入准确话题名。
+2. 打开“系统设置”，配置 OpenAI API Key、模型和飞书 V2 自定义机器人 Webhook，并分别执行连接测试。
+3. 在某个话题顶部点击“配置 AI”，填写具体关注意图，例如商品类别、异常价格条件及排除项。
+4. 可先“分析当前 10 条”检查判断质量；这次预览不会发送飞书通知。
+5. 后续每轮抓取只分析新帖子，达到阈值后自动推送，并在“AI 命中”中保留判断与投递记录。
+
+## 已实现
+
+- 多话题监控、关键词搜索、直接添加、移除与手动刷新
+- 5 分钟后台轮询与最近 10 条动态
+- 三栏拖拽调宽、键盘调宽、布局本地记忆
+- 站内动态详情、分页评论、图片代理与可缩放/拖动画廊
+- 每话题独立 AI 关注意图、阈值、通知开关
+- OpenAI Responses API 结构化判断，可选低清图片联合识别
+- 飞书 V2 Webhook、可选签名校验、测试通知
+- 去重处理、命中历史、错误状态、配置持久化与健康检查
+- 桌面和移动端响应式布局
+
+## 数据文件
+
+- `data/state.json`：话题、动态缓存和最近 AI 判断
+- `data/settings.json`：AI/飞书设置与已处理动态 ID
+
+两者均被 `.gitignore` 排除。正式部署时请限制数据目录的操作系统访问权限，并通过反向代理启用 HTTPS 与访问控制。
+
+## 接口
+
+- `GET /api/health`：进程健康状态
+- `GET /api/status`：抓取与 AI 运行状态
+- `GET|PUT /api/settings`：安全读取或更新集成设置
+- `POST /api/integrations/test-ai`：测试 AI 连接
+- `POST /api/integrations/test-feishu`：发送飞书测试消息
+- `GET /api/topics`：监控话题及最新动态
+- `POST /api/topics`：添加监控话题
+- `PATCH /api/topics/:tag`：更新话题 AI 规则
+- `DELETE /api/topics/:tag`：停止监控
+- `POST /api/topics/:tag/analyze`：手动分析当前动态
+- `GET /api/topics/search?q=关键词`：搜索话题
+- `GET /api/evaluations`：AI 判断与通知记录
+- `GET /api/feeds/:id`：动态完整详情及第一页评论
+- `GET /api/feeds/:id/replies?page=2`：分页评论
+- `GET /api/image?url=图片地址`：酷安图片代理
+
+## 验证
+
+```powershell
+npm test
+node --check server.js
+node --check public/app.js
+```
