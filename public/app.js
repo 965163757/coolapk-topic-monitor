@@ -24,24 +24,31 @@ const lightbox = $("#lightbox");
 const lightboxImage = $("#lightboxImage");
 const lightboxStage = $("#lightboxStage");
 const dashboardView = $("#dashboardView");
+const exploreView = $("#exploreView");
 const addView = $("#addView");
 const aiView = $("#aiView");
 const settingsView = $("#settingsView");
 const breadcrumbCurrent = $("#breadcrumbCurrent");
+const userDialog = $("#userDialog");
+const userProfileContent = $("#userProfileContent");
 
 let topics = [];
 let evaluations = [];
 let status = null;
 let settingsSnapshot = null;
+let archiveSnapshot = null;
 let activeTopicTag = "";
 let activeFeedId = "";
 let activeDetail = null;
 let historyFilter = "matched";
 let feedFilterValue = "";
 let feedAiFilter = "all";
-let feedSortOrder = "desc";
+let feedSortOrder = "created_desc";
 let activeViewName = "dashboard";
 let lightboxState = { zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0 };
+let activeExploreTab = "feeds";
+let activeDiscoveryMode = "recent";
+let discoveryLoaded = false;
 
 const numberFormat = new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
 const dateTimeFormat = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -93,12 +100,13 @@ function toast(message, type = "") {
   setTimeout(() => node.remove(), 3600);
 }
 
-const viewLabels = { dashboard: "动态看板", add: "添加监控", ai: "AI 命中记录", settings: "系统设置" };
+const viewLabels = { dashboard: "动态看板", explore: "内容探索", add: "添加监控", ai: "AI 命中记录", settings: "系统设置" };
 
 function showView(name) {
-  const next = [dashboardView, addView, aiView, settingsView].find((view) => view?.dataset.view === name) || dashboardView;
+  const views = [dashboardView, exploreView, addView, aiView, settingsView];
+  const next = views.find((view) => view?.dataset.view === name) || dashboardView;
   activeViewName = next.dataset.view;
-  for (const view of [dashboardView, addView, aiView, settingsView]) {
+  for (const view of views) {
     if (!view) continue;
     const active = view === next;
     view.hidden = !active;
@@ -116,6 +124,23 @@ function activeTopic() {
 function evaluationFor(feedId) {
   const topicTag = arguments.length > 1 ? arguments[1] : activeTopicTag;
   return evaluations.find((item) => String(item.feedId) === String(feedId) && item.topic === topicTag) || null;
+}
+
+function fetchSortLabel(value) {
+  return { dateline_desc: "最新发布", lastupdate_desc: "最近回复", popular: "互动热度" }[value] || "最新发布";
+}
+
+function displayFeedSort(left, right) {
+  const leftEvaluation = evaluationFor(left.id, left.__monitorTopicTag || activeTopic()?.tag);
+  const rightEvaluation = evaluationFor(right.id, right.__monitorTopicTag || activeTopic()?.tag);
+  if (feedSortOrder === "created_asc") return new Date(left.createdAt || 0) - new Date(right.createdAt || 0);
+  if (feedSortOrder === "updated_desc") return new Date(right.updatedAt || right.createdAt || 0) - new Date(left.updatedAt || left.createdAt || 0);
+  if (feedSortOrder === "popular_desc") {
+    const score = (feed) => Number(feed.likes || 0) * 1_000 + Number(feed.comments || 0) * 20 + Number(feed.shares || 0) * 50;
+    return score(right) - score(left);
+  }
+  if (feedSortOrder === "ai_desc") return Number(rightEvaluation?.confidence || 0) - Number(leftEvaluation?.confidence || 0);
+  return new Date(right.createdAt || 0) - new Date(left.createdAt || 0);
 }
 
 function shortTime(timestamp) {
@@ -143,6 +168,9 @@ function renderMetrics() {
   $("#metricFeeds").textContent = numberFormat.format(totalFeeds);
   $("#metricMatches").textContent = numberFormat.format(matches);
   $("#metricUpdated").textContent = status?.nextPollAt ? timeFormat.format(new Date(status.nextPollAt)) : "--:--";
+  const archived = status?.archive?.feeds ?? archiveSnapshot?.feeds ?? 0;
+  $("#metricFeedsHint").textContent = archived ? `当前 ${totalFeeds} 条 · 已归档 ${numberFormat.format(archived)} 条` : "当前缓存的内容";
+  $("#archiveStatus").innerHTML = `<i class="ph ph-database"></i> 已归档 ${numberFormat.format(archived)} 条动态`;
 }
 
 function evaluationBadge(evaluation) {
@@ -201,7 +229,7 @@ function renderFeed() {
     const aiActive = topic.ai?.enabled && topic.ai?.intent;
     sourceFeeds = topic.feeds || [];
     feedHeader.innerHTML = `
-      <div class="feed-heading"><span class="feed-eyebrow">ACTIVE WATCH</span><h1>${escapeHtml(detail.title || topic.tag)} <span class="live-label">实时</span></h1><p>${numberFormat.format(detail.followers || 0)} 关注 · ${numberFormat.format(detail.posts || 0)} 条内容${aiActive ? " · AI 筛选已开启" : ""}</p></div>
+      <div class="feed-heading"><span class="feed-eyebrow">ACTIVE WATCH</span><h1>${escapeHtml(detail.title || topic.tag)} <span class="live-label">实时</span></h1><p>${numberFormat.format(detail.followers || 0)} 关注 · ${numberFormat.format(detail.posts || 0)} 条内容 · 按${fetchSortLabel(topic.fetch?.sort)}抓取${aiActive ? " · AI 筛选已开启" : ""}</p></div>
       <div class="feed-header-actions">
         <button class="ai-rule-button ${aiActive ? "active" : ""}" type="button" id="openRule"><i class="ph ph-sparkle"></i><span>${aiActive ? "AI 规则" : "配置 AI"}</span></button>
         <button type="button" id="removeTopic" title="停止监控" aria-label="停止监控"><i class="ph ph-trash"></i><span>停止监控</span></button>
@@ -210,7 +238,7 @@ function renderFeed() {
   const keyword = feedFilterValue.trim().toLowerCase();
   let visibleFeeds = keyword ? sourceFeeds.filter((feed) => [feed.title, feed.message, feed.username, feed.__monitorTopicTitle, feed.__monitorTopicTag].some((value) => textOnly(value || "").toLowerCase().includes(keyword))) : [...sourceFeeds];
   if (feedAiFilter === "matched") visibleFeeds = visibleFeeds.filter((feed) => evaluationFor(feed.id, feed.__monitorTopicTag || topic?.tag)?.matched);
-  visibleFeeds.sort((a, b) => (new Date(b.createdAt || 0) - new Date(a.createdAt || 0)) * (feedSortOrder === "desc" ? 1 : -1));
+  visibleFeeds.sort(displayFeedSort);
   if (!allView && topic.lastError) feedList.innerHTML = `<div class="topic-error">本次抓取失败：${escapeHtml(topic.lastError)}</div>`;
   else if (visibleFeeds.length) feedList.innerHTML = visibleFeeds.map(feedRow).join("");
   else feedList.innerHTML = '<div class="search-empty">暂时没有获取到公开动态</div>';
@@ -252,6 +280,7 @@ function renderVerdict(evaluation, topicTag = activeTopicTag) {
     <div class="ai-verdict-head"><span><i class="ph ph-sparkle"></i> ${label}</span><span>${Math.round(evaluation.confidence * 100)}%</span></div>
     <p>${escapeHtml(evaluation.reason)}</p>
     ${evaluation.imageFallback ? '<small class="ai-input-note"><i class="ph ph-text-t"></i> 当前模型未接收图片输入，已按文本完成判断</small>' : ""}
+    ${evaluation.compatibilityFallback ? '<small class="ai-input-note"><i class="ph ph-plugs-connected"></i> 该服务使用了兼容请求格式</small>' : ""}
     ${evaluation.evidence?.length ? `<div class="ai-evidence">${evaluation.evidence.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
   </div>`;
 }
@@ -265,7 +294,7 @@ function renderDetail() {
       <div class="detail-author">
         ${avatar(feed.avatar, feed.username, "feed-avatar")}
         <div><strong>${escapeHtml(feed.username)}</strong><small>${feed.createdAt ? dateTimeFormat.format(new Date(feed.createdAt)) : "时间未知"}${feed.device ? ` · 来自 ${escapeHtml(feed.device)}` : ""}</small></div>
-        <button class="follow-button" type="button">关注 TA</button>
+        ${feed.userId ? `<button class="follow-button" type="button" data-open-user="${escapeHtml(feed.userId)}"><i class="ph ph-user-circle"></i>用户主页</button>` : ""}
       </div>
       <h2 class="detail-title">${escapeHtml(textOnly(feed.title))}</h2>
       <p class="detail-message">${escapeHtml(textOnly(feed.message))}</p>
@@ -284,7 +313,7 @@ function renderDetail() {
 async function openDetail(id, optimisticFeed) {
   activeFeedId = String(id);
   renderFeed();
-  const topicTag = optimisticFeed?.__monitorTopicTag || activeTopic()?.tag || "";
+  const topicTag = optimisticFeed?.__monitorTopicTag || optimisticFeed?.topic || (activeTopicTag === "__all__" ? "" : activeTopic()?.tag || "");
   const topicTitle = optimisticFeed?.__monitorTopicTitle || topics.find((item) => item.tag === topicTag)?.detail?.title || topicTag;
   detailTopicName.textContent = topicTitle ? `#${topicTitle} · 完整内容与评论记录` : "完整内容与评论记录";
   showDialog(detailDialog);
@@ -314,6 +343,7 @@ async function loadDashboard(showSkeleton = false) {
   const [topicPayload, statusPayload, evaluationPayload] = await Promise.all([api("/api/topics"), api("/api/status"), api("/api/evaluations?limit=200")]);
   topics = topicPayload.topics;
   status = statusPayload;
+  archiveSnapshot = statusPayload.archive || archiveSnapshot;
   evaluations = evaluationPayload.evaluations;
   if (!activeTopicTag || (activeTopicTag !== "__all__" && !topics.some((topic) => topic.tag === activeTopicTag))) activeTopicTag = topics[0]?.tag || "";
   renderSidebar();
@@ -387,6 +417,7 @@ async function loadSettings() {
   settingsSnapshot = await api("/api/settings");
   $("#aiEnabled").checked = settingsSnapshot.ai.enabled;
   $("#aiBaseUrl").value = settingsSnapshot.ai.baseUrl;
+  $("#aiProvider").value = settingsSnapshot.ai.provider || "auto";
   $("#aiModel").value = settingsSnapshot.ai.model;
   $("#aiApiMode").value = settingsSnapshot.ai.apiMode || "auto";
   $("#aiReasoning").value = settingsSnapshot.ai.reasoningEffort;
@@ -399,7 +430,24 @@ async function loadSettings() {
   $("#feishuSecret").value = "";
   $("#webhookHint").textContent = settingsSnapshot.feishu.configured ? `已配置：${settingsSnapshot.feishu.webhookMasked}` : "尚未配置";
   $("#secretHint").textContent = settingsSnapshot.feishu.secretConfigured ? "已配置签名" : "未配置";
+  $("#retentionFeedDays").value = settingsSnapshot.retention.feedDays;
+  $("#retentionEvaluationDays").value = settingsSnapshot.retention.evaluationDays;
+  $("#retentionUserDays").value = settingsSnapshot.retention.userDays;
+  $("#retentionMaxFeeds").value = settingsSnapshot.retention.maxFeeds;
+  $("#retentionMaxEvaluations").value = settingsSnapshot.retention.maxEvaluations;
+  $("#retentionCleanupHours").value = settingsSnapshot.retention.cleanupIntervalHours;
+  archiveSnapshot = settingsSnapshot.archive || archiveSnapshot;
+  renderArchiveOverview(settingsSnapshot.archive, settingsSnapshot.retention);
   return settingsSnapshot;
+}
+
+function renderArchiveOverview(summary = archiveSnapshot || {}, retention = settingsSnapshot?.retention || {}) {
+  const lastCleanup = summary?.lastCleanupAt ? dateTimeFormat.format(new Date(summary.lastCleanupAt)) : "暂未清理";
+  $("#archiveOverview").innerHTML = `
+    <span><i class="ph ph-article"></i><b>${numberFormat.format(summary?.feeds || 0)}</b> 动态归档</span>
+    <span><i class="ph ph-sparkle"></i><b>${numberFormat.format(summary?.evaluations || 0)}</b> AI 记录</span>
+    <span><i class="ph ph-user-circle"></i><b>${numberFormat.format(summary?.users || 0)}</b> 用户资料</span>
+    <small>最近清理：${lastCleanup} · 每 ${retention?.cleanupIntervalHours || "--"} 小时执行</small>`;
 }
 
 function settingsPayload() {
@@ -407,6 +455,7 @@ function settingsPayload() {
     ai: {
       enabled: $("#aiEnabled").checked,
       baseUrl: $("#aiBaseUrl").value.trim(),
+      provider: $("#aiProvider").value,
       model: $("#aiModel").value.trim(),
       apiMode: $("#aiApiMode").value,
       reasoningEffort: $("#aiReasoning").value,
@@ -419,6 +468,14 @@ function settingsPayload() {
       webhookUrl: $("#feishuWebhook").value.trim(),
       secret: $("#feishuSecret").value.trim(),
     },
+    retention: {
+      feedDays: Number($("#retentionFeedDays").value),
+      evaluationDays: Number($("#retentionEvaluationDays").value),
+      userDays: Number($("#retentionUserDays").value),
+      maxFeeds: Number($("#retentionMaxFeeds").value),
+      maxEvaluations: Number($("#retentionMaxEvaluations").value),
+      cleanupIntervalHours: Number($("#retentionCleanupHours").value),
+    },
   };
 }
 
@@ -428,6 +485,8 @@ async function saveSettingsForm() {
   $("#settingsSaveStatus").textContent = "正在保存…";
   try {
     settingsSnapshot = await api("/api/settings", { method: "PUT", body: JSON.stringify(settingsPayload()) });
+    archiveSnapshot = settingsSnapshot.archive || archiveSnapshot;
+    renderArchiveOverview(settingsSnapshot.archive, settingsSnapshot.retention);
     $("#settingsSaveStatus").textContent = "设置已保存";
     await loadSettings();
     toast("AI 与通知设置已保存");
@@ -453,6 +512,7 @@ function showRuleDialog() {
   $("#ruleIntent").value = topic.ai?.intent || "";
   $("#ruleThreshold").value = topic.ai?.threshold ?? "";
   $("#ruleNotify").checked = topic.ai?.notify !== false;
+  $("#fetchSort").value = topic.fetch?.sort || "dateline_desc";
   $("#ruleSaveStatus").textContent = "";
   showDialog(ruleDialog);
 }
@@ -467,6 +527,7 @@ async function saveRule() {
       threshold: $("#ruleThreshold").value,
       notify: $("#ruleNotify").checked,
     },
+    fetch: { sort: $("#fetchSort").value },
   };
   $("#ruleSaveStatus").textContent = "正在保存…";
   try {
@@ -497,7 +558,7 @@ function renderAiHistory() {
     const delivery = item.notified ? "已通知" : item.notificationError ? "通知失败" : item.matched ? "未通知" : "";
     return `<article class="history-item ${stateClass}">
       <span class="history-icon"><i class="ph ${icon}"></i></span>
-      <div class="history-main"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.reason)}</p>${item.imageFallback ? '<small class="ai-input-note"><i class="ph ph-text-t"></i> 已按文本完成判断</small>' : ""}</div>
+      <div class="history-main"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.reason)}</p>${item.imageFallback ? '<small class="ai-input-note"><i class="ph ph-text-t"></i> 已按文本完成判断</small>' : ""}${item.compatibilityFallback ? '<small class="ai-input-note"><i class="ph ph-plugs-connected"></i> 已自动切换兼容请求格式</small>' : ""}</div>
       <div class="history-meta"><b>${Math.round(item.confidence * 100)}%</b><span>${delivery}</span><time>${item.evaluatedAt ? `<br>${dateTimeFormat.format(new Date(item.evaluatedAt))}` : ""}</time></div>
     </article>`;
   }).join("") : `<div class="page-empty-state"><span><i class="ph ph-sparkle"></i></span><h3>${historyFilter === "matched" ? "还没有 AI 命中" : "还没有判断记录"}</h3><p>启用 AI 并设置话题关注意图后，新抓取的动态会自动进入这里。</p><button type="button" data-open-settings><i class="ph ph-gear-six"></i>配置 AI 连接</button></div>`;
@@ -506,6 +567,107 @@ function renderAiHistory() {
 function showAiCenter() {
   renderAiHistory();
   showView("ai");
+}
+
+function exploreFeedCard(feed, source = "搜索结果") {
+  const title = textOnly(feed.title) || `${feed.username || "酷友"}的动态`;
+  const message = textOnly(feed.message);
+  const popular = `${numberFormat.format(feed.likes || 0)} 赞 · ${numberFormat.format(feed.comments || 0)} 评`;
+  return `<article class="explore-feed-card" tabindex="0" role="button" data-explore-feed-id="${escapeHtml(feed.id)}">
+    <div class="explore-feed-main">
+      ${avatar(feed.avatar, feed.username, "explore-avatar")}
+      <div class="explore-feed-copy"><div class="explore-feed-title"><strong>${escapeHtml(title)}</strong>${feed.pictures?.[0] ? `<img src="${escapeHtml(imageUrl(feed.pictures[0]))}" alt="${escapeHtml(title)} 配图" loading="lazy" />` : ""}</div><p>${escapeHtml(message || "查看完整动态内容")}</p><span>${escapeHtml(feed.topic || source)} · ${shortTime(feed.createdAt)}</span></div>
+    </div>
+    <footer><span><i class="ph ph-thumbs-up"></i>${popular}</span>${feed.userId ? `<button type="button" data-open-user="${escapeHtml(feed.userId)}"><i class="ph ph-user-circle"></i>${escapeHtml(feed.username || "用户主页")}</button>` : ""}<span class="explore-open"><i class="ph ph-arrow-up-right"></i>打开详情</span></footer>
+  </article>`;
+}
+
+function renderExploreFeeds(target, feeds, emptyTitle, emptyText, source) {
+  target.innerHTML = feeds?.length
+    ? `<div class="explore-result-summary"><strong>找到 ${feeds.length} 条公开动态</strong><span>点击任意卡片在当前页面查看详情与评论</span></div>${feeds.map((feed) => exploreFeedCard(feed, source)).join("")}`
+    : `<div class="page-empty-state compact"><span><i class="ph ph-magnifying-glass"></i></span><h3>${escapeHtml(emptyTitle)}</h3><p>${escapeHtml(emptyText)}</p></div>`;
+}
+
+function renderUserSearchResults(users) {
+  const target = $("#userSearchResults");
+  target.innerHTML = users?.length ? users.map((user) => `<article class="user-search-card">
+    ${avatar(user.avatar, user.username, "user-search-avatar")}
+    <div><strong>${escapeHtml(user.username)}${user.verifyLabel ? `<em>${escapeHtml(user.verifyLabel)}</em>` : ""}</strong><p>${escapeHtml(user.bio || `UID ${user.uid}`)}</p><span>UID ${escapeHtml(user.uid)} · ${numberFormat.format(user.followers || 0)} 粉丝</span></div>
+    <button type="button" data-open-user="${escapeHtml(user.uid)}"><i class="ph ph-user-circle"></i>查看主页</button>
+  </article>`).join("") : '<div class="page-empty-state compact"><span><i class="ph ph-user-circle"></i></span><h3>没有找到相关用户</h3><p>试试完整昵称，或直接输入用户 UID。</p></div>';
+}
+
+function setExploreTab(tab) {
+  activeExploreTab = ["feeds", "discovery", "users"].includes(tab) ? tab : "feeds";
+  $$('[data-explore-tab]').forEach((button) => button.classList.toggle("active", button.dataset.exploreTab === activeExploreTab));
+  $$('[data-explore-panel]').forEach((panel) => {
+    const active = panel.dataset.explorePanel === activeExploreTab;
+    panel.hidden = !active;
+    panel.classList.toggle("active", active);
+  });
+  if (activeExploreTab === "discovery" && !discoveryLoaded) void loadDiscovery();
+}
+
+function showExplore(tab = activeExploreTab) {
+  showView("explore");
+  setExploreTab(tab);
+}
+
+async function searchExploreFeeds() {
+  const input = $("#feedSearchInput");
+  const q = input.value.trim();
+  if (!q) return input.focus();
+  const target = $("#feedSearchResults");
+  target.innerHTML = '<div class="search-empty">正在搜索公开帖子…</div>';
+  try {
+    const sort = $("#feedSearchSort").value;
+    const { feeds } = await api(`/api/search/feeds?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}`);
+    renderExploreFeeds(target, feeds, "没有匹配的帖子", "试试更短的关键词，或用产品名、价格条件重新搜索。", "帖子搜索");
+    archiveSnapshot = { ...(archiveSnapshot || {}), feeds: Math.max(archiveSnapshot?.feeds || 0, (status?.archive?.feeds || 0) + feeds.length) };
+  } catch (error) { target.innerHTML = `<div class="topic-error">${escapeHtml(error.message)}</div>`; }
+}
+
+async function loadDiscovery(force = false) {
+  const target = $("#discoveryResults");
+  if (!force && discoveryLoaded) return;
+  target.innerHTML = '<div class="search-empty">正在获取全站公开动态…</div>';
+  try {
+    const { feeds } = await api(`/api/discovery/feeds?mode=${activeDiscoveryMode}`);
+    renderExploreFeeds(target, feeds, activeDiscoveryMode === "hot" ? "暂时没有热门动态" : "暂时没有最新动态", "稍后刷新，或切换另一种发现排序。", activeDiscoveryMode === "hot" ? "全站热门" : "全站最新");
+    discoveryLoaded = true;
+  } catch (error) { target.innerHTML = `<div class="topic-error">${escapeHtml(error.message)}</div>`; }
+}
+
+async function searchExploreUsers() {
+  const input = $("#userSearchInput");
+  const q = input.value.trim();
+  if (!q) return input.focus();
+  const target = $("#userSearchResults");
+  target.innerHTML = '<div class="search-empty">正在搜索用户…</div>';
+  try {
+    if (/^\d{1,20}$/.test(q)) {
+      target.innerHTML = "";
+      return void openUserProfile(q);
+    }
+    const { users } = await api(`/api/search/users?q=${encodeURIComponent(q)}`);
+    renderUserSearchResults(users);
+  } catch (error) { target.innerHTML = `<div class="topic-error">${escapeHtml(error.message)}</div>`; }
+}
+
+async function openUserProfile(uid) {
+  const cleanUid = String(uid || "").trim();
+  if (!cleanUid) return;
+  userProfileContent.innerHTML = '<div class="detail-loading">正在获取用户公开资料…</div>';
+  showDialog(userDialog);
+  try {
+    const { profile, localFeeds, cached } = await api(`/api/users/${encodeURIComponent(cleanUid)}`);
+    userProfileContent.innerHTML = `<section class="user-profile-hero">
+      <div class="user-profile-cover">${profile.cover ? `<img src="${escapeHtml(imageUrl(profile.cover))}" alt="" loading="lazy" />` : ""}</div>
+      <div class="user-profile-summary">${avatar(profile.avatar, profile.username, "user-profile-avatar")}<div><h3>${escapeHtml(profile.username)}${profile.verifyLabel ? `<em>${escapeHtml(profile.verifyLabel)}</em>` : ""}</h3><span>UID ${escapeHtml(profile.uid)} · Lv.${numberFormat.format(profile.level || 0)}${profile.location ? ` · ${escapeHtml(profile.location)}` : ""}</span><p>${escapeHtml(profile.bio || "这个用户暂未填写个人简介。")}</p></div></div>
+      <div class="user-stat-grid"><span><b>${numberFormat.format(profile.followers || 0)}</b>粉丝</span><span><b>${numberFormat.format(profile.following || 0)}</b>关注</span><span><b>${numberFormat.format(profile.feeds || 0)}</b>动态</span><span><b>${numberFormat.format(profile.likes || 0)}</b>获赞</span></div>
+    </section>
+    <section class="user-local-history"><header><div><h3>本地归档动态</h3><p>${cached ? "使用 30 分钟内的资料缓存" : "资料已从公开主页更新"}</p></div><button type="button" data-refresh-user="${escapeHtml(profile.uid)}"><i class="ph ph-arrow-clockwise"></i>刷新资料</button></header><div>${localFeeds?.length ? localFeeds.map((feed) => `<article class="profile-feed" tabindex="0" role="button" data-explore-feed-id="${escapeHtml(feed.id)}"><strong>${escapeHtml(textOnly(feed.title) || `${feed.username}的动态`)}</strong><p>${escapeHtml(textOnly(feed.message) || "查看完整动态")}</p><span>${shortTime(feed.createdAt)} · 最近发现 ${dateTimeFormat.format(new Date(feed.lastSeenAt || feed.createdAt || Date.now()))}</span></article>`).join("") : '<div class="search-empty">该用户的动态将在你搜索、查看或监控到后自动写入本地归档。</div>'}</div></section>`;
+  } catch (error) { userProfileContent.innerHTML = `<div class="topic-error">${escapeHtml(error.message)}</div>`; }
 }
 
 function updateLightboxTransform() {
@@ -574,6 +736,8 @@ feedHeader.addEventListener("click", async (event) => {
 detailContent.addEventListener("click", async (event) => {
   const picture = event.target.closest("[data-lightbox]");
   if (picture) return openLightbox(picture);
+  const userButton = event.target.closest("[data-open-user]");
+  if (userButton) return void openUserProfile(userButton.dataset.openUser);
   const button = event.target.closest("[data-load-page]");
   if (!button || !activeDetail) return;
   button.disabled = true;
@@ -589,6 +753,8 @@ detailContent.addEventListener("click", async (event) => {
 
 searchForm.addEventListener("submit", (event) => { event.preventDefault(); showSearchPage(searchInput.value); });
 dialogSearchForm.addEventListener("submit", (event) => { event.preventDefault(); void searchKeyword(dialogSearchInput.value); });
+$("#feedSearchForm").addEventListener("submit", (event) => { event.preventDefault(); void searchExploreFeeds(); });
+$("#userSearchForm").addEventListener("submit", (event) => { event.preventDefault(); void searchExploreUsers(); });
 searchResults.addEventListener("click", (event) => {
   const button = event.target.closest("[data-add]");
   if (button && !button.disabled) void addTopic(button.dataset.add, button);
@@ -619,6 +785,39 @@ $("#testFeishu").addEventListener("click", async () => {
     $("#feishuTestStatus").textContent = "测试通知已发送";
   } catch (error) { $("#feishuTestStatus").textContent = error.message; toast(error.message, "error"); }
   finally { button.disabled = false; }
+});
+
+$("#runCleanup").addEventListener("click", async () => {
+  const button = $("#runCleanup");
+  button.disabled = true;
+  $("#cleanupStatus").textContent = "正在清理…";
+  try {
+    if (!(await saveSettingsForm())) return;
+    const result = await api("/api/maintenance/cleanup", { method: "POST" });
+    archiveSnapshot = { feeds: result.feeds, evaluations: result.evaluations, users: result.users, events: result.events, lastCleanupAt: result.ranAt || new Date().toISOString(), lastCleanupSummary: result };
+    renderArchiveOverview(archiveSnapshot, settingsSnapshot?.retention);
+    $("#cleanupStatus").textContent = `已清理 ${Object.values(result.removed || {}).reduce((sum, value) => sum + Number(value || 0), 0)} 条过期数据`;
+    await loadDashboard();
+    toast("本地归档已完成清理");
+  } catch (error) { $("#cleanupStatus").textContent = error.message; toast(error.message, "error"); }
+  finally { button.disabled = false; }
+});
+
+$("#aiProvider").addEventListener("change", () => {
+  const provider = $("#aiProvider").value;
+  const base = $("#aiBaseUrl");
+  const model = $("#aiModel");
+  const mode = $("#aiApiMode");
+  const presets = {
+    anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-20250514", apiMode: "anthropic_messages" },
+    gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash", apiMode: "gemini_generate_content" },
+    openai: { baseUrl: "https://api.openai.com/v1", model: "gpt-5.6-luna", apiMode: "auto" },
+  };
+  const preset = presets[provider];
+  if (!preset) return;
+  base.value = preset.baseUrl;
+  model.value = preset.model;
+  mode.value = preset.apiMode;
 });
 
 $("#analyzeCurrent").addEventListener("click", async () => {
@@ -661,6 +860,7 @@ refreshAll.addEventListener("click", async () => {
 document.addEventListener("click", (event) => {
   if (event.target.closest("#showSearch, #sidebarSearch, #manageTopics")) { event.preventDefault(); showSearchPage(); }
   if (event.target.closest("#openDashboardSidebar, [data-return-dashboard]")) { event.preventDefault(); showView("dashboard"); }
+  if (event.target.closest("#openExploreSidebar, #openExplore")) { event.preventDefault(); showExplore(); }
   if (event.target.closest("#openSettings, #openSettingsSidebar, [data-open-settings]")) { event.preventDefault(); void showSettings(); }
   if (event.target.closest("#openAiCenter, #openAiCenterSidebar")) { event.preventDefault(); showAiCenter(); }
   const quickSearch = event.target.closest("[data-search-keyword]");
@@ -671,6 +871,48 @@ document.addEventListener("click", (event) => {
   }
   const close = event.target.closest("[data-close-dialog]");
   if (close) closeDialog($(`#${close.dataset.closeDialog}`));
+});
+
+exploreView.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-explore-tab]");
+  if (tab) return setExploreTab(tab.dataset.exploreTab);
+  const discovery = event.target.closest("[data-discovery-mode]");
+  if (discovery) {
+    activeDiscoveryMode = discovery.dataset.discoveryMode === "hot" ? "hot" : "recent";
+    $$('[data-discovery-mode]').forEach((button) => button.classList.toggle("active", button === discovery));
+    discoveryLoaded = false;
+    return void loadDiscovery(true);
+  }
+  if (event.target.closest("#refreshDiscovery")) {
+    discoveryLoaded = false;
+    return void loadDiscovery(true);
+  }
+  const userButton = event.target.closest("[data-open-user]");
+  if (userButton) return void openUserProfile(userButton.dataset.openUser);
+  const feedCard = event.target.closest("[data-explore-feed-id]");
+  if (feedCard) {
+    const id = feedCard.dataset.exploreFeedId;
+    const detail = { id, title: feedCard.querySelector("strong")?.textContent || "动态详情", message: "", username: "", pictures: [] };
+    return void openDetail(id, detail);
+  }
+});
+
+exploreView.addEventListener("keydown", (event) => {
+  if ((event.key === "Enter" || event.key === " ") && event.target.matches("[data-explore-feed-id]")) {
+    event.preventDefault();
+    void openDetail(event.target.dataset.exploreFeedId, { id: event.target.dataset.exploreFeedId, title: event.target.querySelector("strong")?.textContent || "动态详情", message: "", username: "", pictures: [] });
+  }
+});
+
+userProfileContent.addEventListener("click", (event) => {
+  const refresh = event.target.closest("[data-refresh-user]");
+  if (refresh) return void (async () => {
+    userProfileContent.querySelector("[data-refresh-user]")?.setAttribute("disabled", "");
+    try { await api(`/api/users/${encodeURIComponent(refresh.dataset.refreshUser)}?refresh=1`); await openUserProfile(refresh.dataset.refreshUser); }
+    catch (error) { toast(error.message, "error"); }
+  })();
+  const feedCard = event.target.closest("[data-explore-feed-id]");
+  if (feedCard) return void openDetail(feedCard.dataset.exploreFeedId, { id: feedCard.dataset.exploreFeedId, title: feedCard.querySelector("strong")?.textContent || "动态详情", message: "", username: "", pictures: [] });
 });
 
 $("#closeDetail").addEventListener("click", () => closeDialog(detailDialog));
@@ -689,9 +931,8 @@ $("#matchedFilter").addEventListener("click", () => {
   $("#matchedFilter span").textContent = feedAiFilter === "matched" ? "仅看 AI 命中" : "全部状态";
   renderFeed();
 });
-$("#sortOrder").addEventListener("click", () => {
-  feedSortOrder = feedSortOrder === "desc" ? "asc" : "desc";
-  $("#sortOrder span").textContent = feedSortOrder === "desc" ? "最新发布" : "最早发布";
+$("#sortOrder").addEventListener("change", () => {
+  feedSortOrder = $("#sortOrder").value;
   renderFeed();
 });
 $("#closeLightbox").addEventListener("click", () => closeDialog(lightbox));

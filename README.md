@@ -45,16 +45,22 @@ npm start
 - 站内动态详情、分页评论、图片代理与可缩放/拖动画廊
 - 每话题独立 AI 关注意图、阈值、通知开关
 - OpenAI Responses API 结构化判断，可选低清图片联合识别
+- OpenAI、Anthropic Messages、Gemini GenerateContent 与 OpenAI 兼容接口的自动适配
 - 飞书 V2 Webhook、可选签名校验、测试通知
-- 去重处理、命中历史、错误状态、配置持久化与健康检查
+- 帖子搜索、全站新鲜/热门动态、用户公开主页与历史动态回溯
+- 抓取排序（发布时间 / 最后更新 / 热度）与工作台排序（时间 / 热度 / AI 置信度）
+- 去重处理、命中历史、错误状态、配置持久化、归档清理与健康检查
 - 桌面和移动端响应式布局
 
 ## 数据文件
 
 - `data/state.json`：话题、动态缓存和最近 AI 判断
 - `data/settings.json`：AI/飞书设置与已处理动态 ID
+- `data/archive.json`：长期帖子归档、帖子详情首屏评论、AI 判断、用户公开资料与系统活动
 
-两者均被 `.gitignore` 排除。正式部署时请限制数据目录的操作系统访问权限，并通过反向代理启用 HTTPS 与访问控制。
+以上运行时数据均被 `.gitignore` 排除。归档采用原子写入和串行落盘；在“系统设置 → 数据保留策略”中可设置帖子、AI 判断、用户资料保留时长和容量上限，也可立即执行清理。正式部署时请限制数据目录的操作系统访问权限，并通过反向代理启用 HTTPS 与访问控制。
+
+详细的分层设计、保留策略与数据流见 [docs/architecture.md](docs/architecture.md)。
 
 ## 接口
 
@@ -73,6 +79,13 @@ npm start
 - `GET /api/feeds/:id`：动态完整详情及第一页评论
 - `GET /api/feeds/:id/replies?page=2`：分页评论
 - `GET /api/image?url=图片地址`：酷安图片代理
+- `GET /api/search/feeds?q=关键词&sort=created_desc`：帖子搜索（远端候选、监控缓存和归档联合检索）
+- `GET /api/discovery/feeds?mode=recent|hot`：全站新鲜或热门动态
+- `GET /api/search/users?q=关键词`：用户搜索
+- `GET /api/users/:uid`：用户公开主页与本地历史动态
+- `GET /api/archive/summary`、`GET /api/archive/feeds`：归档统计与检索
+- `GET /api/activity`：系统活动
+- `POST /api/maintenance/cleanup`：按当前保留策略执行清理
 
 ## 验证
 

@@ -2,6 +2,8 @@ data/state.json
 data/state.json.tmp
 data/settings.json
 data/settings.json.tmp
+data/archive.json
+data/archive.json.tmp
 node_modules/
 .env
 .env.*

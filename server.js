@@ -4,17 +4,20 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { MATCH_SCHEMA, clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
+import { MATCH_SCHEMA, clampThreshold, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
-import { isUnsupportedImageInputError } from "./lib/ai-compat.js";
+import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
+import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, normalizeRetention } from "./lib/store.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
 const STATE_FILE = join(ROOT, "data", "state.json");
 const SETTINGS_FILE = join(ROOT, "data", "settings.json");
+const ARCHIVE_FILE = join(ROOT, "data", "archive.json");
 const PORT = Number(process.env.PORT || 4173);
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000);
 const FEED_LIMIT = 10;
+const MAX_FETCH_LIMIT = 50;
 
 const APP_ID = "wx7c6be4984041fa23";
 const APP_SECRET = "a717e41f8e9254c52da78d70003f24a0";
@@ -23,8 +26,8 @@ const DEVICE_MODEL = "unknown<iPhone18,3>";
 const API_ROOT = "https://api.coolapk.com/v6";
 
 const initialState = {
-  topics: [{ tag: "薅羊毛小分队", detail: null, feeds: [], lastFetchedAt: null, lastError: null }],
-  evaluations: [],
+  version: 2,
+  topics: [{ tag: "薅羊毛小分队", detail: null, feeds: [], fetch: { sort: "dateline_desc", limit: FEED_LIMIT }, lastFetchedAt: null, lastError: null }],
   lastPollAt: null,
   nextPollAt: null,
 };
@@ -34,6 +37,7 @@ const defaultSettings = {
     enabled: false,
     baseUrl: "https://api.openai.com/v1",
     apiKey: "",
+    provider: "auto",
     model: "gpt-5.6-luna",
     apiMode: "auto",
     reasoningEffort: "low",
@@ -46,13 +50,16 @@ const defaultSettings = {
     secret: "",
   },
   processedFeedIds: {},
+  retention: normalizeRetention(),
 };
 
 let state = structuredClone(initialState);
 let settings = structuredClone(defaultSettings);
+let archive = createArchive();
 let pollPromise = null;
 let analysisPromise = null;
-const runtime = { lastAiRunAt: null, lastAiError: null, lastNotificationAt: null };
+let persistenceQueue = Promise.resolve();
+const runtime = { lastAiRunAt: null, lastAiError: null, lastNotificationAt: null, lastCleanupAt: null };
 const topicSearchCache = new Map();
 const aiImageCapabilityCache = new Map();
 
@@ -122,20 +129,85 @@ function secureUrl(url) {
   return typeof url === "string" ? url : "";
 }
 
+function epochMs(value) {
+  const timestamp = Number(value || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return 0;
+  return timestamp > 9_999_999_999 ? timestamp : timestamp * 1000;
+}
+
+function normalizeFetchSort(value) {
+  return ["dateline_desc", "lastupdate_desc", "popular"].includes(value) ? value : "dateline_desc";
+}
+
+function normalizeTopicFetch(value = {}) {
+  return {
+    sort: normalizeFetchSort(value?.sort),
+    limit: Math.max(1, Math.min(MAX_FETCH_LIMIT, Number(value?.limit) || FEED_LIMIT)),
+  };
+}
+
+function feedSortValue(feed, sort) {
+  if (sort === "lastupdate_desc") return Number(feed.updatedAt || feed.createdAt || 0);
+  if (sort === "popular") return Number(feed.likes || 0) * 1_000 + Number(feed.comments || 0) * 20 + Number(feed.shares || 0) * 50;
+  return Number(feed.createdAt || 0);
+}
+
+function sortFeeds(feeds, sort = "dateline_desc") {
+  const normalizedSort = normalizeFetchSort(sort);
+  return [...feeds].sort((left, right) => feedSortValue(right, normalizedSort) - feedSortValue(left, normalizedSort));
+}
+
 function feedSummary(feed) {
   return {
     id: feed.id,
     title: feed.message_title || feed.title || `${feed.username || "酷友"}的动态`,
     message: feed.message || "",
     username: feed.username || feed.userInfo?.username || "酷友",
+    userId: String(feed.uid || feed.userInfo?.uid || feed.userInfo?.id || feed.user_id || ""),
     avatar: secureUrl(feed.userAvatar || feed.userInfo?.userAvatar || ""),
     pictures: (feed.picArr?.length ? feed.picArr : feed.pic ? [feed.pic] : []).map(secureUrl).slice(0, 3),
     likes: Number(feed.likenum || 0),
     comments: Number(feed.commentnum || 0),
     shares: Number(feed.forwardnum || feed.share_num || 0),
-    createdAt: Number(feed.dateline || feed.create_time || 0) * 1000,
+    createdAt: epochMs(feed.dateline || feed.create_time),
+    updatedAt: epochMs(feed.lastupdate || feed.last_update || feed.dateline || feed.create_time),
     device: feed.device_title || "",
+    topic: feed.ttitle || feed.topic || feed.tname || "",
     url: `https://www.coolapk.com/feed/${feed.id}`,
+  };
+}
+
+function feedItems(data) {
+  const result = [];
+  const visit = (value, depth = 0) => {
+    if (depth > 3 || value == null) return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof value !== "object") return;
+    if (value.entityType === "feed" || (value.id && value.message !== undefined && (value.username || value.userInfo))) result.push(value);
+    if (Array.isArray(value.entities)) visit(value.entities, depth + 1);
+  };
+  visit(data);
+  return [...new Map(result.map((item) => [String(item.id), item])).values()];
+}
+
+function publicUserSummary(user = {}) {
+  return {
+    uid: String(user.uid || user.id || user.entityId || ""),
+    username: String(user.username || user.displayUsername || user.title || "酷友"),
+    avatar: secureUrl(user.userAvatar || user.userBigAvatar || user.logo || ""),
+    cover: secureUrl(user.cover || ""),
+    bio: String(user.bio || user.intro || user.description || ""),
+    verifyLabel: String(user.verify_label || user.verify_title || ""),
+    level: Number(user.level || 0),
+    followers: Number(user.fans || user.fans_num || 0),
+    following: Number(user.follow || user.follow_num || 0),
+    feeds: Number(user.feed || user.feed_num || 0),
+    likes: Number(user.be_like_num || 0),
+    location: [user.province, user.city].filter(Boolean).join(" · "),
+    url: user.url || (user.uid ? `/u/${user.uid}` : ""),
   };
 }
 
@@ -143,12 +215,13 @@ function replySummary(reply) {
   return {
     id: reply.id,
     username: reply.username || reply.userInfo?.username || "酷友",
+    userId: String(reply.uid || reply.userInfo?.uid || reply.userInfo?.id || ""),
     avatar: secureUrl(reply.userAvatar || reply.userInfo?.userAvatar || ""),
     message: reply.message || "",
     picture: secureUrl(reply.pic || ""),
     likes: Number(reply.likenum || 0),
     replyCount: Number(reply.replynum || 0),
-    createdAt: Number(reply.dateline || 0) * 1000,
+    createdAt: epochMs(reply.dateline),
     isAuthor: Boolean(reply.isFeedAuthor),
     replyTo: reply.rusername || "",
     replies: (reply.replyRows || []).map(replySummary),
@@ -156,23 +229,32 @@ function replySummary(reply) {
 }
 
 async function fetchFeedDetail(id, page = 1) {
-  const [detailPayload, replyPayload] = await Promise.all([
-    coolapkGet("/feed/detail", { id }),
-    fetchReplies(id, page),
-  ]);
-  const raw = detailPayload.data;
-  return {
-    feed: {
-      ...feedSummary(raw),
-      pictures: (raw.picArr?.length ? raw.picArr : raw.pic ? [raw.pic] : []).map(secureUrl),
-      topic: raw.ttitle || "",
-      location: raw.ip_location || raw.location || "",
-      favorites: Number(raw.favnum || 0),
-      replyCount: Number(raw.replynum || raw.commentnum || 0),
-    },
-    replies: replyPayload,
-    page,
-  };
+  try {
+    const [detailPayload, replyPayload] = await Promise.all([
+      coolapkGet("/feed/detail", { id }),
+      fetchReplies(id, page),
+    ]);
+    const raw = detailPayload.data;
+    const result = {
+      feed: {
+        ...feedSummary(raw),
+        pictures: (raw.picArr?.length ? raw.picArr : raw.pic ? [raw.pic] : []).map(secureUrl),
+        topic: raw.ttitle || "",
+        location: raw.ip_location || raw.location || "",
+        favorites: Number(raw.favnum || 0),
+        replyCount: Number(raw.replynum || raw.commentnum || 0),
+      },
+      replies: replyPayload,
+      page,
+    };
+    archiveFeedDetail(archive, result, { page });
+    await saveArchive();
+    return result;
+  } catch (error) {
+    const cached = archivedFeedDetail(archive, id);
+    if (cached?.feed && page === 1) return { ...cached, cached: true };
+    throw error;
+  }
 }
 
 async function fetchReplies(id, page = 1) {
@@ -196,6 +278,7 @@ async function fetchTopic(input) {
     sourceId: stored?.sourceId ?? storedDetail.sourceId,
   }, stored?.tag || "");
   const requested = stored ? storedSource : parseSourceKey(input);
+  const fetchConfig = normalizeTopicFetch(stored?.fetch);
 
   let detailPayload;
   if (requested.type === "product" && requested.id != null && String(requested.id)) {
@@ -207,20 +290,17 @@ async function fetchTopic(input) {
 
   const detail = topicSummary(detailPayload.data);
   const feedRequest = detail.sourceType === "product"
-    ? coolapkGet("/page/dataList", { url: "/product/feedList", id: detail.sourceId, type: "feed", page: 1, listType: "dateline_desc" })
-    : coolapkGet("/topic/tagFeedList", { tag: detail.tag, page: 1, listType: "dateline_desc" });
+    ? coolapkGet("/page/dataList", { url: "/product/feedList", id: detail.sourceId, type: "feed", page: 1, listType: fetchConfig.sort })
+    : coolapkGet("/topic/tagFeedList", { tag: detail.tag, page: 1, listType: fetchConfig.sort });
   const feedPayload = await feedRequest.catch(() => ({ data: [] }));
-  const feeds = (Array.isArray(feedPayload.data) ? feedPayload.data : [])
-    .filter((item) => item?.entityType === "feed" || (item?.id && item?.message !== undefined))
-    .map(feedSummary)
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, FEED_LIMIT);
+  const feeds = sortFeeds(feedItems(feedPayload.data).map(feedSummary), fetchConfig.sort).slice(0, fetchConfig.limit);
   return {
     detail,
     feeds,
     sourceType: detail.sourceType,
     sourceId: detail.sourceId,
     sourceKey: detail.sourceKey,
+    fetch: fetchConfig,
   };
 }
 
@@ -255,12 +335,108 @@ async function searchTopics(keyword) {
   return uniqueResults;
 }
 
+async function searchFeeds(keyword, page = 1, sort = "dateline_desc") {
+  const q = String(keyword || "").trim();
+  if (!q) return [];
+  const payload = await coolapkGet("/search", {
+    type: "feed",
+    searchValue: q,
+    page,
+    showAnonymous: -1,
+  }).catch(() => ({ data: [] }));
+  const includesKeyword = (feed) => [feed.title, feed.message, feed.username, feed.topic]
+    .some((value) => String(value || "").replace(/<[^>]+>/g, " ").toLowerCase().includes(q.toLowerCase()));
+  const direct = feedItems(payload.data).map(feedSummary);
+  const archived = Object.values(archive.feeds).filter(includesKeyword);
+  const candidates = await searchTopics(q).catch(() => []);
+  const topicFeeds = (await Promise.all(candidates.slice(0, 3).map((candidate) => fetchTopic({
+    tag: candidate.tag || candidate.title,
+    detail: candidate,
+    sourceType: candidate.sourceType,
+    sourceId: candidate.sourceId,
+    sourceKey: candidate.sourceKey,
+    fetch: { sort: "dateline_desc", limit: FEED_LIMIT },
+  }).then((result) => result.feeds).catch(() => [])))).flat();
+  let fallback = [];
+  if (![...direct, ...archived, ...topicFeeds].some(includesKeyword)) {
+    const [recent, hot] = await Promise.all([
+      coolapkGet("/topic/recentFeedList", { page: 1 }).catch(() => ({ data: [] })),
+      coolapkGet("/topic/hotFeedList", { page: 1 }).catch(() => ({ data: [] })),
+    ]);
+    fallback = [...feedItems(recent.data), ...feedItems(hot.data)].map(feedSummary);
+  }
+  const feeds = sortFeeds(
+    [...new Map([...direct, ...archived, ...topicFeeds, ...fallback].filter(includesKeyword).map((feed) => [String(feed.id), feed])).values()],
+    sort,
+  );
+  const now = new Date().toISOString();
+  feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `search:${q}`, topic: "帖子搜索", now }));
+  if (feeds.length) await saveArchive();
+  return feeds;
+}
+
+async function searchUsers(keyword, page = 1) {
+  const q = String(keyword || "").trim();
+  if (!q) return [];
+  const payload = await coolapkGet("/search", {
+    type: "user",
+    searchValue: q,
+    page,
+    showAnonymous: -1,
+  }).catch(() => ({ data: [] }));
+  const remoteUsers = (payload.data || [])
+    .filter((item) => item?.entityType === "user" || item?.uid || item?.userInfo?.uid)
+    .map((item) => publicUserSummary(item.userInfo || item))
+    .filter((item) => item.uid);
+  const lowerQuery = q.toLowerCase();
+  const localUsers = [
+    ...Object.values(archive.users),
+    ...Object.values(archive.feeds)
+      .filter((feed) => String(feed.username || "").toLowerCase().includes(lowerQuery))
+      .map((feed) => ({ uid: feed.userId, username: feed.username, avatar: feed.avatar, bio: "来自本地归档动态", followers: 0, following: 0, feeds: 0, likes: 0, location: "", verifyLabel: "", level: 0, url: feed.userId ? `/u/${feed.userId}` : "" })),
+  ].filter((user) => user?.uid && String(user.username || "").toLowerCase().includes(lowerQuery));
+  const users = [...new Map([...remoteUsers, ...localUsers].map((user) => [String(user.uid), user])).values()];
+  const now = new Date().toISOString();
+  users.forEach((user) => archiveUser(archive, user, now));
+  if (users.length) await saveArchive();
+  return [...new Map(users.map((user) => [user.uid, user])).values()];
+}
+
+async function fetchDiscoveryFeeds(mode = "recent", page = 1) {
+  const normalizedMode = mode === "hot" ? "hot" : "recent";
+  const path = normalizedMode === "hot" ? "/topic/hotFeedList" : "/topic/recentFeedList";
+  const payload = await coolapkGet(path, { page });
+  const sort = normalizedMode === "hot" ? "popular" : "dateline_desc";
+  const feeds = sortFeeds(feedItems(payload.data).map(feedSummary), sort).slice(0, MAX_FETCH_LIMIT);
+  const now = new Date().toISOString();
+  feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `discovery:${normalizedMode}`, topic: "全站发现", now }));
+  if (feeds.length) await saveArchive();
+  return feeds;
+}
+
+async function fetchUserProfile(uid, { refresh = false } = {}) {
+  const cleanUid = String(uid || "").trim();
+  if (!/^\d{1,20}$/.test(cleanUid)) throw new Error("请输入有效的酷安用户 UID");
+  const cached = archive.users[cleanUid];
+  const cachedAt = new Date(cached?.lastFetchedAt || 0).getTime();
+  if (!refresh && cached && Date.now() - cachedAt < 30 * 60 * 1000) {
+    return { profile: cached, localFeeds: archivedFeedsForUser(archive, cleanUid), cached: true };
+  }
+  const payload = await coolapkGet("/user/profile", { uid: cleanUid });
+  const profile = publicUserSummary(payload.data || {});
+  if (!profile.uid) throw new Error("未找到该用户主页");
+  archiveUser(archive, profile);
+  await saveArchive();
+  return { profile, localFeeds: archivedFeedsForUser(archive, profile.uid), cached: false };
+}
+
 function resolvedAiSettings() {
   return {
     ...settings.ai,
     baseUrl: process.env.OPENAI_BASE_URL || settings.ai.baseUrl,
     apiKey: process.env.OPENAI_API_KEY || settings.ai.apiKey,
     model: process.env.OPENAI_MODEL || settings.ai.model,
+    provider: process.env.AI_PROVIDER || settings.ai.provider || "auto",
     apiMode: process.env.OPENAI_API_MODE || settings.ai.apiMode || "auto",
   };
 }
@@ -280,8 +456,11 @@ function publicSettings() {
     ai: {
       enabled: Boolean(settings.ai.enabled),
       baseUrl: ai.baseUrl,
+      provider: normalizeAiProvider(ai.provider),
+      detectedProvider: inferAiProvider(ai),
       model: ai.model,
       apiMode: normalizeAiApiMode(ai.apiMode),
+      supportedApiModes: AI_API_MODES,
       reasoningEffort: settings.ai.reasoningEffort,
       includeImages: Boolean(settings.ai.includeImages),
       threshold: clampThreshold(settings.ai.threshold),
@@ -300,42 +479,22 @@ function publicSettings() {
       analyzing: Boolean(analysisPromise),
       ...runtime,
     },
+    retention: normalizeRetention(settings.retention),
+    archive: archiveSummary(archive),
   };
 }
 
-function normalizeAiApiMode(value) {
-  return ["auto", "responses", "chat_completions"].includes(value) ? value : "auto";
-}
-
-function preferredAiApiModes(ai) {
-  const configured = normalizeAiApiMode(ai.apiMode);
-  if (configured !== "auto") return [configured];
-  let host = "";
-  try { host = new URL(ai.baseUrl).hostname.toLowerCase(); } catch { /* URL validation happens on save. */ }
-  return host === "api.openai.com" || host.endsWith(".openai.com")
-    ? ["responses", "chat_completions"]
-    : ["chat_completions", "responses"];
-}
-
-function aiEndpoint(ai, mode) {
-  const baseUrl = String(ai.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
-  return `${baseUrl}/${mode === "responses" ? "responses" : "chat/completions"}`;
-}
-
 function aiErrorMessage(failure) {
-  const message = String(failure.payload?.error?.message || failure.payload?.message || failure.payload?.detail?.message || "").trim();
+  const message = String(failure?.payload?.error?.message || failure?.payload?.message || failure?.payload?.detail?.message || "").trim();
   if (message) return message;
-  if (failure.response.status === 404) {
-    const endpoint = failure.mode === "responses" ? "/responses" : "/chat/completions";
+  if (failure?.response?.status === 404) {
+    const endpoint = failure.mode === "responses" ? "/responses"
+      : failure.mode === "anthropic_messages" ? "/messages"
+        : failure.mode === "gemini_generate_content" ? "/models/{model}:generateContent"
+          : "/chat/completions";
     return `AI 服务未提供 ${endpoint} 接口`;
   }
-  return `AI 请求失败（HTTP ${failure.response.status}）`;
-}
-
-function shouldTryAlternateAiApi(failure) {
-  if (failure.response.status !== 404) return false;
-  const message = String(failure.payload?.error?.message || failure.payload?.message || failure.raw || "").toLowerCase();
-  return !message || (!/model|模型/.test(message) && /not found|endpoint|route|path|接口|未找到/.test(message));
+  return `AI 请求失败（HTTP ${failure?.response?.status || "未知"}）`;
 }
 
 async function requestAi(ai, bodies, timeoutMs) {
@@ -346,18 +505,24 @@ async function requestAi(ai, bodies, timeoutMs) {
 
   for (let index = 0; index < modes.length; index += 1) {
     const mode = modes[index];
-    const response = await fetch(aiEndpoint(ai, mode), {
-      method: "POST",
-      headers: { Authorization: `Bearer ${ai.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify(bodies[mode]),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const raw = await response.text();
-    let payload = {};
-    try { payload = raw ? JSON.parse(raw) : {}; } catch { /* Some providers return an empty 404 body. */ }
-    if (response.ok) return { mode, payload };
-
-    lastFailure = { mode, response, payload, raw };
+    const body = bodies[mode];
+    if (!body) continue;
+    const variants = requestBodyVariants(mode, body);
+    for (let variantIndex = 0; variantIndex < variants.length; variantIndex += 1) {
+      const response = await fetch(aiEndpoint(ai, mode), {
+        method: "POST",
+        headers: aiHeaders(ai, mode),
+        body: JSON.stringify(variants[variantIndex]),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const raw = await response.text();
+      let payload = {};
+      try { payload = raw ? JSON.parse(raw) : {}; } catch { /* Some providers return an empty error response. */ }
+      if (response.ok) return { mode, payload, compatibilityFallback: variantIndex > 0 };
+      lastFailure = { mode, response, payload, raw };
+      if (variantIndex < variants.length - 1 && isCompatibilityFailure(lastFailure)) continue;
+      break;
+    }
     if (apiMode === "auto" && index < modes.length - 1 && shouldTryAlternateAiApi(lastFailure)) continue;
     break;
   }
@@ -365,14 +530,20 @@ async function requestAi(ai, bodies, timeoutMs) {
 }
 
 function aiModeLabel(mode) {
-  return mode === "responses" ? "Responses API" : "Chat Completions";
+  return {
+    responses: "Responses API",
+    chat_completions: "Chat Completions",
+    anthropic_messages: "Anthropic Messages",
+    gemini_generate_content: "Gemini GenerateContent",
+  }[mode] || mode;
 }
 
 function aiImageCapabilityKey(ai) {
-  return `${String(ai.baseUrl || "").replace(/\/+$/, "").toLowerCase()}|${String(ai.model || "").toLowerCase()}|${normalizeAiApiMode(ai.apiMode)}`;
+  return `${String(ai.baseUrl || "").replace(/\/+$/, "").toLowerCase()}|${String(ai.model || "").toLowerCase()}|${normalizeAiProvider(ai.provider)}|${normalizeAiApiMode(ai.apiMode)}`;
 }
 
 function classificationBodies(ai, prompt, imageUrls) {
+  const systemInstruction = "你是高精度信息监控分类器。严格按关注意图判断帖子是否值得提醒。只输出 JSON 对象，字段为 matched、confidence、reason、evidence。";
   const responseContent = [
     { type: "input_text", text: prompt },
     ...imageUrls.map((imageUrl) => ({ type: "input_image", image_url: imageUrl, detail: "low" })),
@@ -380,13 +551,20 @@ function classificationBodies(ai, prompt, imageUrls) {
   const chatContent = imageUrls.length
     ? [{ type: "text", text: prompt }, ...imageUrls.map((imageUrl) => ({ type: "image_url", image_url: { url: imageUrl, detail: "low" } }))]
     : prompt;
+  const anthropicImages = imageUrls.map(dataUrlParts).filter(Boolean).map((image) => ({
+    type: "image",
+    source: { type: "base64", media_type: image.mediaType, data: image.data },
+  }));
+  const geminiImages = imageUrls.map(dataUrlParts).filter(Boolean).map((image) => ({
+    inline_data: { mime_type: image.mediaType, data: image.data },
+  }));
   return {
     responses: {
       model: ai.model,
       reasoning: { effort: settings.ai.reasoningEffort || "low" },
       max_output_tokens: 500,
       input: [
-        { role: "system", content: [{ type: "input_text", text: "你是高精度信息监控分类器。严格按关注意图判断帖子是否值得提醒，并输出结构化 JSON。" }] },
+        { role: "system", content: [{ type: "input_text", text: systemInstruction }] },
         { role: "user", content: responseContent },
       ],
       text: { format: { type: "json_schema", name: "topic_match", strict: true, schema: MATCH_SCHEMA } },
@@ -395,19 +573,52 @@ function classificationBodies(ai, prompt, imageUrls) {
       model: ai.model,
       max_tokens: 500,
       messages: [
-        { role: "system", content: "你是高精度信息监控分类器。严格按关注意图判断帖子是否值得提醒，并只输出 JSON 对象，字段为 matched、confidence、reason、evidence。" },
+        { role: "system", content: systemInstruction },
         { role: "user", content: chatContent },
       ],
       response_format: { type: "json_object" },
     },
+    anthropic_messages: {
+      model: ai.model,
+      max_tokens: 500,
+      system: systemInstruction,
+      messages: [{ role: "user", content: [...anthropicImages, { type: "text", text: prompt }] }],
+    },
+    gemini_generate_content: {
+      systemInstruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: "user", parts: [{ text: prompt }, ...geminiImages] }],
+      generationConfig: { maxOutputTokens: 500, responseMimeType: "application/json", responseSchema: MATCH_SCHEMA },
+    },
   };
 }
 
-async function saveSettings() {
-  await mkdir(dirname(SETTINGS_FILE), { recursive: true });
-  const temporary = `${SETTINGS_FILE}.tmp`;
-  await writeFile(temporary, JSON.stringify(settings, null, 2), "utf8");
-  await rename(temporary, SETTINGS_FILE);
+async function writeJsonAtomic(file, payload) {
+  await mkdir(dirname(file), { recursive: true });
+  const temporary = `${file}.tmp`;
+  await writeFile(temporary, payload, "utf8");
+  await rename(temporary, file);
+}
+
+function queueJsonWrite(file, value) {
+  const payload = JSON.stringify(value, null, 2);
+  persistenceQueue = persistenceQueue.catch(() => {}).then(() => writeJsonAtomic(file, payload));
+  return persistenceQueue;
+}
+
+function saveSettings() {
+  return queueJsonWrite(SETTINGS_FILE, settings);
+}
+
+function saveState() {
+  return queueJsonWrite(STATE_FILE, state);
+}
+
+function saveArchive() {
+  return queueJsonWrite(ARCHIVE_FILE, archive);
+}
+
+async function flushPersistence() {
+  await persistenceQueue;
 }
 
 async function fetchImageInput(url) {
@@ -461,11 +672,17 @@ async function classifyFeed(topic, feed) {
     imageFallback = true;
     result = await requestAi(ai, classificationBodies(ai, prompt, []), 45_000);
   }
-  const output = result.mode === "responses" ? extractResponseText(result.payload) : extractChatCompletionText(result.payload);
+  const output = extractAiText(result.payload, result.mode);
   if (!output) throw new Error("AI 未返回可解析的判断结果");
-  let parsed;
-  try { parsed = JSON.parse(output); } catch { throw new Error("AI 返回的判断结果不是有效 JSON"); }
-  return { ...normalizeMatchResult(parsed), model: ai.model, imageFallback };
+  const parsed = parseAiJson(output);
+  return {
+    ...normalizeMatchResult(parsed),
+    model: ai.model,
+    provider: inferAiProvider(ai),
+    mode: result.mode,
+    imageFallback,
+    compatibilityFallback: Boolean(result.compatibilityFallback),
+  };
 }
 
 async function postFeishu(body) {
@@ -518,9 +735,11 @@ async function testAiConnection() {
   const result = await requestAi(ai, {
     responses: { model: ai.model, input: "只回复：连接成功", max_output_tokens: 32 },
     chat_completions: { model: ai.model, messages: [{ role: "user", content: "只回复：连接成功" }], max_tokens: 32 },
+    anthropic_messages: { model: ai.model, max_tokens: 32, messages: [{ role: "user", content: "只回复：连接成功" }] },
+    gemini_generate_content: { contents: [{ role: "user", parts: [{ text: "只回复：连接成功" }] }], generationConfig: { maxOutputTokens: 32 } },
   }, 30_000);
-  const response = result.mode === "responses" ? extractResponseText(result.payload) : extractChatCompletionText(result.payload);
-  return { ok: true, model: ai.model, mode: result.mode, modeLabel: aiModeLabel(result.mode), response: response.slice(0, 100) };
+  const response = extractAiText(result.payload, result.mode);
+  return { ok: true, model: ai.model, provider: inferAiProvider(ai), mode: result.mode, modeLabel: aiModeLabel(result.mode), compatibilityFallback: Boolean(result.compatibilityFallback), response: response.slice(0, 100) };
 }
 
 async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
@@ -550,7 +769,11 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
           reason: raw.reason,
           evidence: raw.evidence,
           model: raw.model,
+          provider: raw.provider,
+          apiMode: raw.mode,
           imageFallback: Boolean(raw.imageFallback),
+          compatibilityFallback: Boolean(raw.compatibilityFallback),
+          sourceKey: topic.sourceKey || "",
           status: "completed",
           notified: false,
           notificationError: null,
@@ -564,13 +787,21 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
             evaluation.notificationError = error.message;
           }
         }
-        state.evaluations = state.evaluations.filter((item) => !(
+        archive.evaluations = archive.evaluations.filter((item) => !(
           item.topic === tag
           && String(item.feedId) === String(feed.id)
           && item.status === "error"
           && isUnsupportedImageInputError(item.reason)
         ));
-        state.evaluations.unshift(evaluation);
+        archive.evaluations.unshift(evaluation);
+        appendArchiveEvent(archive, {
+          type: evaluation.matched ? "ai_matched" : "ai_evaluated",
+          level: evaluation.matched ? "success" : "info",
+          message: evaluation.matched ? `AI 命中「${evaluation.title}」` : `AI 已判断「${evaluation.title}」`,
+          topic: tag,
+          sourceKey: topic.sourceKey,
+          feedId: feed.id,
+        });
         results.push(evaluation);
       } catch (error) {
         const evaluation = {
@@ -585,23 +816,34 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
           reason: error.message,
           evidence: [],
           model: resolvedAiSettings().model,
+          provider: inferAiProvider(resolvedAiSettings()),
+          apiMode: normalizeAiApiMode(resolvedAiSettings().apiMode),
+          sourceKey: topic.sourceKey || "",
           status: "error",
           notified: false,
           notificationError: null,
           evaluatedAt: new Date().toISOString(),
         };
         runtime.lastAiError = error.message;
-        state.evaluations.unshift(evaluation);
+        archive.evaluations.unshift(evaluation);
+        appendArchiveEvent(archive, {
+          type: "ai_error",
+          level: "error",
+          message: `AI 判断失败：${error.message}`,
+          topic: tag,
+          sourceKey: topic.sourceKey,
+          feedId: feed.id,
+        });
         results.push(evaluation);
       }
       processed.add(String(feed.id));
       settings.processedFeedIds[tag] = [...processed].slice(-500);
-      state.evaluations = state.evaluations.slice(0, 500);
-      await Promise.all([saveState(), saveSettings()]);
+      archive.evaluations = archive.evaluations.slice(0, normalizeRetention(settings.retention).maxEvaluations);
+      await Promise.all([saveArchive(), saveSettings()]);
     }
     topic.ai.lastAnalyzedAt = new Date().toISOString();
     runtime.lastAiRunAt = topic.ai.lastAnalyzedAt;
-    await saveState();
+    await Promise.all([saveState(), saveArchive()]);
     return results;
   })();
   analysisPromise = task;
@@ -615,8 +857,7 @@ async function loadState() {
   } catch (error) {
     if (error.code !== "ENOENT") console.error("读取监控状态失败：", error.message);
   }
-  state.evaluations = Array.isArray(state.evaluations) ? state.evaluations.slice(0, 500) : [];
-  state.evaluations = state.evaluations.filter((item) => !(item.status === "error" && isUnsupportedImageInputError(item.reason)));
+  state.evaluations = Array.isArray(state.evaluations) ? state.evaluations.filter((item) => !(item.status === "error" && isUnsupportedImageInputError(item.reason))) : [];
   state.topics = state.topics.map((topic) => {
     const source = canonicalSource({
       ...(topic.detail || {}),
@@ -628,6 +869,7 @@ async function loadState() {
       sourceType: source.type,
       sourceId: source.id,
       sourceKey: topic.sourceKey || source.key,
+      fetch: normalizeTopicFetch(topic.fetch),
       ai: {
         enabled: Boolean(topic.ai?.enabled),
         intent: String(topic.ai?.intent || ""),
@@ -648,38 +890,87 @@ async function loadSettings() {
       ai: { ...defaultSettings.ai, ...(stored.ai || {}) },
       feishu: { ...defaultSettings.feishu, ...(stored.feishu || {}) },
       processedFeedIds: stored.processedFeedIds && typeof stored.processedFeedIds === "object" ? stored.processedFeedIds : {},
+      retention: normalizeRetention(stored.retention),
     };
   } catch (error) {
     if (error.code !== "ENOENT") console.error("读取系统设置失败：", error.message);
   }
 }
 
-async function saveState() {
-  await mkdir(dirname(STATE_FILE), { recursive: true });
-  const temporary = `${STATE_FILE}.tmp`;
-  await writeFile(temporary, JSON.stringify(state, null, 2), "utf8");
-  await rename(temporary, STATE_FILE);
+async function loadArchive() {
+  try {
+    archive = createArchive(JSON.parse(await readFile(ARCHIVE_FILE, "utf8")));
+  } catch (error) {
+    if (error.code !== "ENOENT") console.error("读取归档数据失败：", error.message);
+  }
+  const legacyEvaluations = Array.isArray(state.evaluations) ? state.evaluations : [];
+  if (legacyEvaluations.length) {
+    const existingIds = new Set(archive.evaluations.map((item) => String(item.id)));
+    archive.evaluations = [...legacyEvaluations.filter((item) => !existingIds.has(String(item.id))), ...archive.evaluations]
+      .sort((left, right) => new Date(right.evaluatedAt || 0) - new Date(left.evaluatedAt || 0));
+  }
+  archive.evaluations = archive.evaluations.filter((item) => !(item.status === "error" && isUnsupportedImageInputError(item.reason)));
+  delete state.evaluations;
+  const summary = cleanupArchive(archive, settings.retention);
+  runtime.lastCleanupAt = summary.ranAt;
+  await Promise.all([saveState(), saveArchive()]);
 }
 
 async function refreshTopic(tag) {
   const index = state.topics.findIndex((topic) => topic.tag === tag);
   if (index < 0) throw new Error("该话题未被监控");
+  const now = new Date().toISOString();
   try {
     const data = await fetchTopic(state.topics[index]);
     state.topics[index] = {
       ...state.topics[index],
       ...data,
-      lastFetchedAt: new Date().toISOString(),
+      lastFetchedAt: now,
       lastError: null,
     };
+    data.feeds.forEach((feed) => archiveFeed(archive, feed, { topic: state.topics[index].tag, sourceKey: state.topics[index].sourceKey, now }));
+    appendArchiveEvent(archive, {
+      type: "fetch_completed",
+      level: "success",
+      message: `已抓取 ${data.feeds.length} 条${state.topics[index].fetch.sort === "popular" ? "热门" : "最新"}动态`,
+      topic: state.topics[index].tag,
+      sourceKey: state.topics[index].sourceKey,
+      createdAt: now,
+    });
   } catch (error) {
     state.topics[index].lastError = error.message;
-    state.topics[index].lastFetchedAt = new Date().toISOString();
+    state.topics[index].lastFetchedAt = now;
+    appendArchiveEvent(archive, {
+      type: "fetch_error",
+      level: "error",
+      message: `抓取失败：${error.message}`,
+      topic: state.topics[index].tag,
+      sourceKey: state.topics[index].sourceKey,
+      createdAt: now,
+    });
     throw error;
   } finally {
-    await saveState();
+    await Promise.all([saveState(), saveArchive()]);
   }
   return state.topics[index];
+}
+
+async function runMaintenance({ force = false } = {}) {
+  const retention = normalizeRetention(settings.retention);
+  const previous = new Date(archive.maintenance?.lastCleanupAt || 0).getTime();
+  if (!force && previous && Date.now() - previous < retention.cleanupIntervalHours * 3_600_000) {
+    return { skipped: true, ...archiveSummary(archive) };
+  }
+  const summary = cleanupArchive(archive, retention);
+  runtime.lastCleanupAt = summary.ranAt;
+  appendArchiveEvent(archive, {
+    type: "maintenance_cleanup",
+    level: "info",
+    message: `定时清理完成：移除 ${summary.removed.feeds + summary.removed.evaluations + summary.removed.users + summary.removed.events} 条过期数据`,
+    createdAt: summary.ranAt,
+  });
+  await saveArchive();
+  return { skipped: false, ...summary };
 }
 
 async function pollAll() {
@@ -700,7 +991,7 @@ async function pollAll() {
         console.error(`刷新“${tag}”失败：`, error.message);
       }
     }
-    await saveState();
+    await Promise.all([saveState(), runMaintenance()]);
   })().finally(() => {
     pollPromise = null;
   });
@@ -785,7 +1076,7 @@ async function handleApi(request, response, url) {
     return proxyImage(url.searchParams.get("url") || "", response);
   }
   if (request.method === "GET" && url.pathname === "/api/health") {
-    return sendJson(response, 200, { ok: true, uptimeSeconds: Math.round(process.uptime()), topics: state.topics.length, now: new Date().toISOString() });
+    return sendJson(response, 200, { ok: true, uptimeSeconds: Math.round(process.uptime()), topics: state.topics.length, archive: archiveSummary(archive), now: new Date().toISOString() });
   }
   if (request.method === "GET" && url.pathname === "/api/status") {
     return sendJson(response, 200, {
@@ -794,6 +1085,8 @@ async function handleApi(request, response, url) {
       nextPollAt: state.nextPollAt,
       refreshing: Boolean(pollPromise),
       ai: publicSettings().runtime,
+      archive: archiveSummary(archive),
+      retention: normalizeRetention(settings.retention),
     });
   }
   if (request.method === "GET" && url.pathname === "/api/settings") {
@@ -810,8 +1103,9 @@ async function handleApi(request, response, url) {
         if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:")) return sendJson(response, 400, { error: "AI API 地址必须使用 HTTPS（本机地址除外）" });
         settings.ai.baseUrl = parsed.toString().replace(/\/$/, "");
       }
+      if (AI_API_MODES.includes(next.apiMode)) settings.ai.apiMode = next.apiMode;
+      if (["auto", "openai", "anthropic", "gemini"].includes(next.provider)) settings.ai.provider = next.provider;
       if (typeof next.model === "string" && next.model.trim()) settings.ai.model = next.model.trim().slice(0, 100);
-      if (["auto", "responses", "chat_completions"].includes(next.apiMode)) settings.ai.apiMode = next.apiMode;
       if (["none", "low", "medium", "high"].includes(next.reasoningEffort)) settings.ai.reasoningEffort = next.reasoningEffort;
       if (typeof next.includeImages === "boolean") settings.ai.includeImages = next.includeImages;
       if (next.threshold != null) settings.ai.threshold = clampThreshold(next.threshold);
@@ -829,7 +1123,9 @@ async function handleApi(request, response, url) {
       if (next.clearWebhook === true) settings.feishu.webhookUrl = "";
       if (next.clearSecret === true) settings.feishu.secret = "";
     }
-    await saveSettings();
+    if (body.retention && typeof body.retention === "object") settings.retention = normalizeRetention({ ...settings.retention, ...body.retention });
+    appendArchiveEvent(archive, { type: "settings_updated", level: "info", message: "系统集成与数据留存设置已更新" });
+    await Promise.all([saveSettings(), saveArchive()]);
     return sendJson(response, 200, publicSettings());
   }
   if (request.method === "POST" && url.pathname === "/api/integrations/test-ai") {
@@ -842,8 +1138,52 @@ async function handleApi(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/evaluations") {
     const tag = (url.searchParams.get("topic") || "").trim();
     const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 100)));
-    const evaluations = state.evaluations.filter((item) => !tag || item.topic === tag).slice(0, limit);
+    const evaluations = archive.evaluations.filter((item) => !tag || item.topic === tag).slice(0, limit);
     return sendJson(response, 200, { evaluations });
+  }
+  if (request.method === "GET" && url.pathname === "/api/archive/summary") {
+    return sendJson(response, 200, { archive: archiveSummary(archive), retention: normalizeRetention(settings.retention) });
+  }
+  if (request.method === "GET" && url.pathname === "/api/archive/feeds") {
+    const topic = String(url.searchParams.get("topic") || "").trim();
+    const uid = String(url.searchParams.get("uid") || "").trim();
+    const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 50)));
+    const feeds = Object.values(archive.feeds)
+      .filter((feed) => !topic || (feed.topicTags || []).includes(topic))
+      .filter((feed) => !uid || String(feed.userId || "") === uid)
+      .sort((left, right) => new Date(right.lastSeenAt || right.createdAt || 0) - new Date(left.lastSeenAt || left.createdAt || 0))
+      .slice(0, limit);
+    return sendJson(response, 200, { feeds });
+  }
+  if (request.method === "GET" && url.pathname === "/api/activity") {
+    const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") || 100)));
+    return sendJson(response, 200, { events: archive.events.slice(0, limit) });
+  }
+  if (request.method === "POST" && url.pathname === "/api/maintenance/cleanup") {
+    return sendJson(response, 200, await runMaintenance({ force: true }));
+  }
+  if (request.method === "GET" && url.pathname === "/api/search/feeds") {
+    const q = String(url.searchParams.get("q") || "").trim();
+    if (!q) return sendJson(response, 400, { error: "请输入帖子搜索关键词" });
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    const sort = normalizeFetchSort(url.searchParams.get("sort") || "dateline_desc");
+    return sendJson(response, 200, { feeds: await searchFeeds(q, page, sort), q, page, sort });
+  }
+  if (request.method === "GET" && url.pathname === "/api/search/users") {
+    const q = String(url.searchParams.get("q") || "").trim();
+    if (!q) return sendJson(response, 400, { error: "请输入用户昵称或 UID" });
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, { users: await searchUsers(q, page), q, page });
+  }
+  if (request.method === "GET" && url.pathname === "/api/discovery/feeds") {
+    const mode = url.searchParams.get("mode") === "hot" ? "hot" : "recent";
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, { feeds: await fetchDiscoveryFeeds(mode, page), mode, page });
+  }
+  const userMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
+  if (userMatch && request.method === "GET") {
+    const refresh = url.searchParams.get("refresh") === "1";
+    return sendJson(response, 200, await fetchUserProfile(userMatch[1], { refresh }));
   }
   if (request.method === "GET" && url.pathname === "/api/topics") {
     return sendJson(response, 200, { topics: state.topics });
@@ -872,6 +1212,7 @@ async function handleApi(request, response, url) {
           sourceType: cached.detail.sourceType,
           sourceId: cached.detail.sourceId,
           sourceKey: cached.detail.sourceKey,
+          fetch: normalizeTopicFetch(),
         }));
       } else {
         const suggestions = await searchTopics(cleanTag).catch(() => []);
@@ -886,9 +1227,19 @@ async function handleApi(request, response, url) {
     }
     const existing = state.topics.find((item) => item.sourceKey === data.sourceKey || item.tag === data.detail.tag);
     if (existing) return sendJson(response, 409, { error: "该监控源已在列表中", topic: existing });
-    const topic = { tag: data.detail.tag || data.detail.title || cleanTag, ...data, ai: { enabled: false, intent: "", threshold: null, notify: true, lastAnalyzedAt: null }, lastFetchedAt: new Date().toISOString(), lastError: null };
+    const now = new Date().toISOString();
+    const topic = {
+      tag: data.detail.tag || data.detail.title || cleanTag,
+      ...data,
+      fetch: normalizeTopicFetch(data.fetch),
+      ai: { enabled: false, intent: "", threshold: null, notify: true, lastAnalyzedAt: null },
+      lastFetchedAt: now,
+      lastError: null,
+    };
     state.topics.unshift(topic);
-    await saveState();
+    (topic.feeds || []).forEach((feed) => archiveFeed(archive, feed, { topic: topic.tag, sourceKey: topic.sourceKey, now }));
+    appendArchiveEvent(archive, { type: "monitor_added", level: "success", message: `已添加监控：${topic.detail?.title || topic.tag}`, topic: topic.tag, sourceKey: topic.sourceKey, createdAt: now });
+    await Promise.all([saveState(), saveArchive()]);
     return sendJson(response, 201, { topic });
   }
   if (request.method === "POST" && url.pathname === "/api/refresh") {
@@ -898,7 +1249,13 @@ async function handleApi(request, response, url) {
   const repliesMatch = url.pathname.match(/^\/api\/feeds\/(\d+)\/replies$/);
   if (repliesMatch && request.method === "GET") {
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
-    return sendJson(response, 200, { replies: await fetchReplies(repliesMatch[1], page), page });
+    const replies = await fetchReplies(repliesMatch[1], page);
+    const record = archive.feeds[repliesMatch[1]];
+    if (record && page === 1) {
+      record.detail = { ...(record.detail || {}), replies, page, savedAt: new Date().toISOString() };
+      await saveArchive();
+    }
+    return sendJson(response, 200, { replies, page });
   }
   const feedMatch = url.pathname.match(/^\/api\/feeds\/(\d+)$/);
   if (feedMatch && request.method === "GET") {
@@ -919,6 +1276,7 @@ async function handleApi(request, response, url) {
     if (!topic) return sendJson(response, 404, { error: "未找到该话题" });
     const body = await readJson(request);
     const ai = body.ai && typeof body.ai === "object" ? body.ai : {};
+    const fetchConfig = body.fetch && typeof body.fetch === "object" ? body.fetch : {};
     const wasEnabled = Boolean(topic.ai?.enabled);
     topic.ai = {
       enabled: typeof ai.enabled === "boolean" ? ai.enabled : wasEnabled,
@@ -927,12 +1285,20 @@ async function handleApi(request, response, url) {
       notify: typeof ai.notify === "boolean" ? ai.notify : topic.ai?.notify !== false,
       lastAnalyzedAt: topic.ai?.lastAnalyzedAt || null,
     };
+    topic.fetch = normalizeTopicFetch({ ...topic.fetch, ...fetchConfig });
     if (topic.ai.enabled && !topic.ai.intent) return sendJson(response, 400, { error: "启用 AI 筛选前请填写关注意图" });
     if (!wasEnabled && topic.ai.enabled && !settings.processedFeedIds[tag]) {
       settings.processedFeedIds[tag] = (topic.feeds || []).map((feed) => String(feed.id));
       await saveSettings();
     }
-    await saveState();
+    appendArchiveEvent(archive, {
+      type: "monitor_updated",
+      level: "info",
+      message: `已更新监控规则，抓取排序：${topic.fetch.sort}`,
+      topic: topic.tag,
+      sourceKey: topic.sourceKey,
+    });
+    await Promise.all([saveState(), saveArchive()]);
     return sendJson(response, 200, { topic });
   }
   if (topicMatch && request.method === "DELETE") {
@@ -941,7 +1307,8 @@ async function handleApi(request, response, url) {
     state.topics = state.topics.filter((topic) => topic.tag !== tag);
     if (state.topics.length === before) return sendJson(response, 404, { error: "未找到该话题" });
     delete settings.processedFeedIds[tag];
-    await Promise.all([saveState(), saveSettings()]);
+    appendArchiveEvent(archive, { type: "monitor_removed", level: "info", message: `已停止监控：${tag}`, topic: tag });
+    await Promise.all([saveState(), saveSettings(), saveArchive()]);
     return sendJson(response, 200, { ok: true });
   }
   return sendJson(response, 404, { error: "接口不存在" });
@@ -958,7 +1325,9 @@ const server = createServer(async (request, response) => {
   }
 });
 
-await Promise.all([loadState(), loadSettings()]);
+await loadState();
+await loadSettings();
+await loadArchive();
 state.nextPollAt = new Date(Date.now() + POLL_INTERVAL_MS).toISOString();
 server.listen(PORT, () => {
   console.log(`酷安话题监控已启动：http://localhost:${PORT}`);
@@ -971,7 +1340,13 @@ timer.unref();
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
     clearInterval(timer);
-    server.close(() => process.exit(0));
+    server.close(() => {
+      void (async () => {
+        await Promise.all([saveState(), saveSettings(), saveArchive()]);
+        await flushPersistence();
+        process.exit(0);
+      })();
+    });
   });
 }
 
