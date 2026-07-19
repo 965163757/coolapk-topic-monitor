@@ -9,4 +9,5 @@ node_modules/
 .env.*
 qa-*.png
 public/qa-*.png
+design-audit/
 *.log
