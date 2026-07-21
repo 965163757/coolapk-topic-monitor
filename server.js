@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { MATCH_SCHEMA, clampThreshold, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
-import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, normalizeRetention } from "./lib/store.js";
+import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -16,8 +16,10 @@ const SETTINGS_FILE = join(ROOT, "data", "settings.json");
 const ARCHIVE_FILE = join(ROOT, "data", "archive.json");
 const PORT = Number(process.env.PORT || 4173);
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000);
-const FEED_LIMIT = 10;
-const MAX_FETCH_LIMIT = 50;
+const FEED_LIMIT = 20;
+const MAX_FETCH_LIMIT = 100;
+const MAX_FETCH_PAGES = 10;
+const MAX_FRONT_SCAN_PAGES = 50;
 
 const APP_ID = "wx7c6be4984041fa23";
 const APP_SECRET = "a717e41f8e9254c52da78d70003f24a0";
@@ -26,7 +28,7 @@ const DEVICE_MODEL = "unknown<iPhone18,3>";
 const API_ROOT = "https://api.coolapk.com/v6";
 
 const initialState = {
-  version: 2,
+  version: 3,
   topics: [{ tag: "薅羊毛小分队", detail: null, feeds: [], fetch: { sort: "dateline_desc", limit: FEED_LIMIT }, lastFetchedAt: null, lastError: null }],
   lastPollAt: null,
   nextPollAt: null,
@@ -142,7 +144,7 @@ function normalizeFetchSort(value) {
 function normalizeTopicFetch(value = {}) {
   return {
     sort: normalizeFetchSort(value?.sort),
-    limit: Math.max(1, Math.min(MAX_FETCH_LIMIT, Number(value?.limit) || FEED_LIMIT)),
+    limit: Math.max(10, Math.min(MAX_FETCH_LIMIT, Number(value?.limit) || FEED_LIMIT)),
   };
 }
 
@@ -269,6 +271,12 @@ async function fetchReplies(id, page = 1) {
   return (payload.data || []).map(replySummary);
 }
 
+async function fetchTopicFeedPage(detail, page) {
+  return detail.sourceType === "product"
+    ? coolapkGet("/page/dataList", { url: "/product/feedList", id: detail.sourceId, type: "feed", page, listType: "dateline_desc" })
+    : coolapkGet("/topic/tagFeedList", { tag: detail.tag, page, listType: "dateline_desc" });
+}
+
 async function fetchTopic(input) {
   const stored = input && typeof input === "object" ? input : null;
   const storedDetail = stored?.detail || {};
@@ -289,14 +297,118 @@ async function fetchTopic(input) {
   if (!isSupportedSource(detailPayload.data)) throw new Error("该结果不是可监控的话题或数码产品");
 
   const detail = topicSummary(detailPayload.data);
-  const feedRequest = detail.sourceType === "product"
-    ? coolapkGet("/page/dataList", { url: "/product/feedList", id: detail.sourceId, type: "feed", page: 1, listType: fetchConfig.sort })
-    : coolapkGet("/topic/tagFeedList", { tag: detail.tag, page: 1, listType: fetchConfig.sort });
-  const feedPayload = await feedRequest.catch(() => ({ data: [] }));
-  const feeds = sortFeeds(feedItems(feedPayload.data).map(feedSummary), fetchConfig.sort).slice(0, fetchConfig.limit);
+  const pendingScan = stored?.scanCursor && Array.isArray(stored.scanCursor.cursorFeedIds)
+    ? stored.scanCursor
+    : null;
+  const cursorFeedIds = pendingScan?.cursorFeedIds?.length
+    ? pendingScan.cursorFeedIds
+    : (stored?.feeds || []).map((feed) => String(feed.id));
+  const knownFeedIds = new Set(cursorFeedIds.map(String));
+  const discovered = new Map();
+  const freshFeeds = new Map();
+  const pageCache = new Map();
+  let pagesFetched = 0;
+  let scanComplete = false;
+  let scanError = "";
+  let failedPage = null;
+  let lastContinuationPage = 0;
+  let frontScanIncomplete = false;
+  let currentFrontFeedIds = [];
+
+  const fetchPage = async (page) => {
+    if (pageCache.has(page)) return pageCache.get(page);
+    let feedPayload;
+    try {
+      feedPayload = await fetchTopicFeedPage(detail, page);
+    } catch (error) {
+      if (page === 1) throw error;
+      failedPage = page;
+      scanError = `第 ${page} 页抓取失败：${error.message}`;
+      return null;
+    }
+    pagesFetched += 1;
+    const pageFeeds = feedItems(feedPayload.data).map(feedSummary);
+    pageCache.set(page, pageFeeds);
+    return pageFeeds;
+  };
+
+  const consumePage = (pageFeeds, { fresh = false } = {}) => {
+    pageFeeds.forEach((feed) => {
+      discovered.set(String(feed.id), feed);
+      if (fresh) freshFeeds.set(String(feed.id), feed);
+    });
+    return pageFeeds.some((feed) => knownFeedIds.has(String(feed.id)));
+  };
+
+  if (pendingScan) {
+    const frontAnchorFeedIds = new Set((pendingScan.frontAnchorFeedIds?.length
+      ? pendingScan.frontAnchorFeedIds
+      : pendingScan.cursorFeedIds || []).map(String));
+    let frontAnchorPage = 0;
+    for (let page = 1; page <= MAX_FRONT_SCAN_PAGES; page += 1) {
+      const pageFeeds = await fetchPage(page);
+      if (pageFeeds == null) { frontScanIncomplete = true; break; }
+      if (!pageFeeds.length) { scanComplete = true; break; }
+      if (page === 1) currentFrontFeedIds = pageFeeds.map((feed) => String(feed.id));
+      if (consumePage(pageFeeds, { fresh: true })) { scanComplete = true; break; }
+      if (pageFeeds.some((feed) => frontAnchorFeedIds.has(String(feed.id)))) {
+        frontAnchorPage = page;
+        break;
+      }
+    }
+    if (!scanComplete && !frontAnchorPage && !frontScanIncomplete) {
+      frontScanIncomplete = true;
+      scanError = `前沿增量超过单轮 ${MAX_FRONT_SCAN_PAGES} 页扫描上限`;
+    }
+    if (!scanComplete && frontAnchorPage && !frontScanIncomplete) {
+      const continuationStart = pendingContinuationStart(pendingScan.nextPage, frontAnchorPage);
+      for (let offset = 0; offset < MAX_FETCH_PAGES; offset += 1) {
+        const page = continuationStart + offset;
+        lastContinuationPage = page;
+        const pageFeeds = await fetchPage(page);
+        if (pageFeeds == null) break;
+        if (!pageFeeds.length) { scanComplete = true; break; }
+        if (consumePage(pageFeeds)) { scanComplete = true; break; }
+      }
+    }
+  } else {
+    for (let page = 1; page <= MAX_FETCH_PAGES; page += 1) {
+      lastContinuationPage = page;
+      const pageFeeds = await fetchPage(page);
+      if (pageFeeds == null) break;
+      if (!pageFeeds.length) { scanComplete = true; break; }
+      if (page === 1) currentFrontFeedIds = pageFeeds.map((feed) => String(feed.id));
+      const reachedPreviousCursor = consumePage(pageFeeds, { fresh: true });
+      if (reachedPreviousCursor || (!knownFeedIds.size && freshFeeds.size >= fetchConfig.limit)) {
+        scanComplete = true;
+        break;
+      }
+    }
+  }
+  const discoveredFeeds = [...discovered.values()];
+  if (stored?.feeds?.length && !discoveredFeeds.length) throw new Error("动态列表返回空数据，已保留上次成功结果");
+  if (!scanComplete && !scanError) scanError = `增量扫描达到单轮 ${MAX_FETCH_PAGES} 页上限`;
+  const continuationPage = frontScanIncomplete
+    ? Number(pendingScan?.nextPage || 2)
+    : failedPage || Math.max(2, lastContinuationPage + 1);
+  const scanCursor = scanComplete ? null : {
+    cursorFeedIds: [...knownFeedIds],
+    nextPage: continuationPage,
+    frontAnchorFeedIds: frontScanIncomplete
+      ? (pendingScan?.frontAnchorFeedIds || pendingScan?.cursorFeedIds || [])
+      : currentFrontFeedIds,
+    startedAt: pendingScan?.startedAt || new Date().toISOString(),
+    lastAttemptAt: new Date().toISOString(),
+  };
+  const feeds = sortFeeds(freshFeeds.size ? [...freshFeeds.values()] : discoveredFeeds, "dateline_desc").slice(0, fetchConfig.limit);
   return {
     detail,
     feeds,
+    discoveredFeeds,
+    pagesFetched,
+    scanComplete,
+    scanError,
+    scanCursor,
     sourceType: detail.sourceType,
     sourceId: detail.sourceId,
     sourceKey: detail.sourceKey,
@@ -449,6 +561,19 @@ function resolvedFeishuSettings() {
   };
 }
 
+function effectiveTopicThreshold(topic) {
+  return clampThreshold(topic?.ai?.threshold, clampThreshold(settings.ai.threshold));
+}
+
+function topicsWithEffectiveThresholds() {
+  return state.topics.map((topic) => ({ ...topic, effectiveThreshold: effectiveTopicThreshold(topic) }));
+}
+
+function currentEvaluation(evaluation) {
+  const topic = state.topics.find((item) => item.tag === evaluation?.topic);
+  return resolveEvaluation(evaluation, topic ? { ...topic, effectiveThreshold: effectiveTopicThreshold(topic) } : null);
+}
+
 function publicSettings() {
   const ai = resolvedAiSettings();
   const feishu = resolvedFeishuSettings();
@@ -481,6 +606,27 @@ function publicSettings() {
     },
     retention: normalizeRetention(settings.retention),
     archive: archiveSummary(archive),
+  };
+}
+
+function publicTopicSnapshot(topic) {
+  const archiveCount = Object.values(archive.feeds).filter((feed) => (
+    (feed.topicTags || []).includes(topic.tag) || (feed.sourceKeys || []).includes(topic.sourceKey)
+  )).length;
+  const matchCount = latestEvaluations(archive.evaluations)
+    .filter((item) => item.topic === topic.tag)
+    .map((item) => resolveEvaluation(item, { ...topic, effectiveThreshold: effectiveTopicThreshold(topic) }))
+    .filter((item) => item.matched).length;
+  return {
+    ...topic,
+    archiveCount,
+    matchCount,
+    currentFeedCount: topic.feeds?.length || 0,
+    ai: {
+      ...topic.ai,
+      effectiveThreshold: effectiveTopicThreshold(topic),
+      thresholdSource: topic.ai?.threshold == null ? "global" : "topic",
+    },
   };
 }
 
@@ -543,7 +689,7 @@ function aiImageCapabilityKey(ai) {
 }
 
 function classificationBodies(ai, prompt, imageUrls) {
-  const systemInstruction = "你是高精度信息监控分类器。严格按关注意图判断帖子是否值得提醒。只输出 JSON 对象，字段为 matched、confidence、reason、evidence。";
+  const systemInstruction = "你是高精度信息监控分类器。严格按关注意图判断帖子是否值得提醒。只输出 JSON 对象，字段为 matchScore、reason、evidence。matchScore 是帖子符合关注意图的程度：0 表示完全不符合，1 表示完全符合；它不是对真假结论的把握度。";
   const responseContent = [
     { type: "input_text", text: prompt },
     ...imageUrls.map((imageUrl) => ({ type: "input_image", image_url: imageUrl, detail: "low" })),
@@ -652,6 +798,7 @@ async function classifyFeed(topic, feed) {
     `帖子标题：${feed.title}`,
     `帖子正文：${String(feed.message || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 8000)}`,
     "请判断这条帖子是否真正符合关注意图。宁可减少误报，不要只因为出现个别关键词就判定命中。价格、商品、活动条件等关键信息若只在图片中，也要结合图片判断。",
+    "请用 matchScore 表示匹配程度；是否达到通知条件由系统阈值统一决定。",
   ].join("\n");
 
   const imageUrls = [];
@@ -719,7 +866,7 @@ async function sendFeishuNotification(topic, feed, evaluation) {
           title: `🎯 AI 命中：#${topic.tag}`,
           content: [
             [{ tag: "text", text: `${feed.title}\n` }],
-            [{ tag: "text", text: `作者：${feed.username}｜置信度：${Math.round(evaluation.confidence * 100)}%\n` }],
+            [{ tag: "text", text: `作者：${feed.username}｜匹配度：${Math.round(evaluation.matchScore * 100)}%｜通知阈值：${Math.round(evaluation.threshold * 100)}%\n` }],
             [{ tag: "text", text: `判断：${evaluation.reason}\n` }],
             [{ tag: "text", text: `关注意图：${topic.ai.intent}\n` }],
             [{ tag: "a", text: "查看酷安动态", href: feed.url }],
@@ -742,20 +889,28 @@ async function testAiConnection() {
   return { ok: true, model: ai.model, provider: inferAiProvider(ai), mode: result.mode, modeLabel: aiModeLabel(result.mode), compatibilityFallback: Boolean(result.compatibilityFallback), response: response.slice(0, 100) };
 }
 
-async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
+async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inputFeeds = null } = {}) {
   if (analysisPromise) throw new Error("已有 AI 分析任务正在运行");
   const task = (async () => {
     const topic = state.topics.find((item) => item.tag === tag);
     if (!topic) throw new Error("未找到该监控话题");
     if (!topic.ai?.enabled || !topic.ai?.intent?.trim()) throw new Error("请先配置并启用该话题的 AI 关注意图");
     const processed = new Set(settings.processedFeedIds[tag] || []);
-    const feeds = (topic.feeds || []).filter((feed) => force || !processed.has(String(feed.id)));
+    const latestByFeed = new Map(latestEvaluations(archive.evaluations)
+      .filter((item) => item.topic === tag)
+      .map((item) => [String(item.feedId), item]));
+    const feeds = (Array.isArray(inputFeeds) ? inputFeeds : topic.feeds || []).filter((feed) => {
+      if (force) return true;
+      if (processed.has(String(feed.id))) return false;
+      const previous = latestByFeed.get(String(feed.id));
+      return !previous?.nextRetryAt || new Date(previous.nextRetryAt).getTime() <= Date.now();
+    });
     const results = [];
     runtime.lastAiError = null;
     for (const feed of feeds) {
       try {
         const raw = await classifyFeed(topic, feed);
-        const threshold = clampThreshold(topic.ai.threshold, clampThreshold(settings.ai.threshold));
+        const threshold = effectiveTopicThreshold(topic);
         const evaluation = {
           id: `${feed.id}-${Date.now()}`,
           topic: tag,
@@ -763,9 +918,12 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
           title: feed.title,
           username: feed.username,
           feedUrl: feed.url,
-          matched: Boolean(raw.matched && raw.confidence >= threshold),
-          confidence: raw.confidence,
+          matched: raw.matchScore >= threshold,
+          matchedAtEvaluation: raw.matchScore >= threshold,
+          matchScore: raw.matchScore,
+          scoreVersion: 2,
           threshold,
+          thresholdAtEvaluation: threshold,
           reason: raw.reason,
           evidence: raw.evidence,
           model: raw.model,
@@ -785,13 +943,13 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
             evaluation.notified = Boolean(sent.sent);
           } catch (error) {
             evaluation.notificationError = error.message;
+            evaluation.nextRetryAt = new Date(Date.now() + 5 * 60_000).toISOString();
           }
         }
         archive.evaluations = archive.evaluations.filter((item) => !(
           item.topic === tag
           && String(item.feedId) === String(feed.id)
           && item.status === "error"
-          && isUnsupportedImageInputError(item.reason)
         ));
         archive.evaluations.unshift(evaluation);
         appendArchiveEvent(archive, {
@@ -803,7 +961,11 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
           feedId: feed.id,
         });
         results.push(evaluation);
+        if (!evaluation.notificationError) processed.add(String(feed.id));
       } catch (error) {
+        const previousError = latestByFeed.get(String(feed.id));
+        const retryCount = previousError?.status === "error" ? Number(previousError.retryCount || 1) + 1 : 1;
+        const retryMinutes = Math.min(60, 5 * (2 ** Math.min(4, retryCount - 1)));
         const evaluation = {
           id: `${feed.id}-${Date.now()}`,
           topic: tag,
@@ -812,7 +974,8 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
           username: feed.username,
           feedUrl: feed.url,
           matched: false,
-          confidence: 0,
+          matchScore: null,
+          scoreVersion: 2,
           reason: error.message,
           evidence: [],
           model: resolvedAiSettings().model,
@@ -820,11 +983,18 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
           apiMode: normalizeAiApiMode(resolvedAiSettings().apiMode),
           sourceKey: topic.sourceKey || "",
           status: "error",
+          retryCount,
+          nextRetryAt: new Date(Date.now() + retryMinutes * 60_000).toISOString(),
           notified: false,
           notificationError: null,
           evaluatedAt: new Date().toISOString(),
         };
         runtime.lastAiError = error.message;
+        archive.evaluations = archive.evaluations.filter((item) => !(
+          item.topic === tag
+          && String(item.feedId) === String(feed.id)
+          && item.status === "error"
+        ));
         archive.evaluations.unshift(evaluation);
         appendArchiveEvent(archive, {
           type: "ai_error",
@@ -836,7 +1006,6 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
         });
         results.push(evaluation);
       }
-      processed.add(String(feed.id));
       settings.processedFeedIds[tag] = [...processed].slice(-500);
       archive.evaluations = archive.evaluations.slice(0, normalizeRetention(settings.retention).maxEvaluations);
       await Promise.all([saveArchive(), saveSettings()]);
@@ -853,7 +1022,7 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true } = {}) {
 async function loadState() {
   try {
     const stored = JSON.parse(await readFile(STATE_FILE, "utf8"));
-    if (Array.isArray(stored.topics)) state = { ...structuredClone(initialState), ...stored };
+    if (Array.isArray(stored.topics)) state = { ...structuredClone(initialState), ...stored, version: initialState.version };
   } catch (error) {
     if (error.code !== "ENOENT") console.error("读取监控状态失败：", error.message);
   }
@@ -910,36 +1079,73 @@ async function loadArchive() {
       .sort((left, right) => new Date(right.evaluatedAt || 0) - new Date(left.evaluatedAt || 0));
   }
   archive.evaluations = archive.evaluations.filter((item) => !(item.status === "error" && isUnsupportedImageInputError(item.reason)));
+  const topicsByTag = new Map(state.topics.map((topic) => [topic.tag, topic]));
+  archive.evaluations = archive.evaluations.map((item) => {
+    if (item.scoreVersion || item.status === "error") return item;
+    const topic = topicsByTag.get(item.topic);
+    const effectiveThreshold = topic ? effectiveTopicThreshold(topic) : clampThreshold(item.threshold);
+    const inheritedThresholdBug = topic?.ai?.threshold == null && Number(item.threshold) === 0.1 && effectiveThreshold > 0.1;
+    return {
+      ...item,
+      ...(inheritedThresholdBug ? { threshold: effectiveThreshold, matched: Boolean(item.matched && Number(item.confidence || 0) >= effectiveThreshold) } : {}),
+      matchedAtEvaluation: inheritedThresholdBug ? Boolean(item.matched && Number(item.confidence || 0) >= effectiveThreshold) : Boolean(item.matched),
+      thresholdAtEvaluation: inheritedThresholdBug ? effectiveThreshold : clampThreshold(item.threshold),
+      scoreVersion: 1,
+      scoreSemantics: "legacy_decision_confidence",
+    };
+  });
+  for (const item of latestEvaluations(archive.evaluations).filter((evaluation) => evaluation.status === "error" || evaluation.notificationError)) {
+    const processed = new Set(settings.processedFeedIds[item.topic] || []);
+    if (processed.delete(String(item.feedId))) settings.processedFeedIds[item.topic] = [...processed];
+  }
   delete state.evaluations;
   const summary = cleanupArchive(archive, settings.retention);
   runtime.lastCleanupAt = summary.ranAt;
-  await Promise.all([saveState(), saveArchive()]);
+  await Promise.all([saveState(), saveSettings(), saveArchive()]);
 }
 
 async function refreshTopic(tag) {
   const index = state.topics.findIndex((topic) => topic.tag === tag);
   if (index < 0) throw new Error("该话题未被监控");
   const now = new Date().toISOString();
+  let refreshedFeeds = [];
   try {
     const data = await fetchTopic(state.topics[index]);
-    state.topics[index] = {
-      ...state.topics[index],
-      ...data,
-      lastFetchedAt: now,
-      lastError: null,
-    };
-    data.feeds.forEach((feed) => archiveFeed(archive, feed, { topic: state.topics[index].tag, sourceKey: state.topics[index].sourceKey, now }));
+    const { discoveredFeeds, pagesFetched, scanComplete, scanError, scanCursor, ...topicData } = data;
+    refreshedFeeds = discoveredFeeds || data.feeds;
+    (discoveredFeeds || data.feeds).forEach((feed) => archiveFeed(archive, feed, { topic: state.topics[index].tag, sourceKey: state.topics[index].sourceKey, now }));
+    if (scanComplete) {
+      state.topics[index] = {
+        ...state.topics[index],
+        ...topicData,
+        scanCursor: null,
+        lastAttemptAt: now,
+        lastFetchedAt: now,
+        lastError: null,
+      };
+    } else {
+      const { feeds: _freshFeeds, ...stableTopicData } = topicData;
+      state.topics[index] = {
+        ...state.topics[index],
+        ...stableTopicData,
+        scanCursor,
+        lastAttemptAt: now,
+        lastError: `${scanError || "增量扫描尚未完成"}；已保存本轮数据并保留原游标，将从第 ${scanCursor?.nextPage || 2} 页续抓`,
+      };
+    }
     appendArchiveEvent(archive, {
-      type: "fetch_completed",
-      level: "success",
-      message: `已抓取 ${data.feeds.length} 条${state.topics[index].fetch.sort === "popular" ? "热门" : "最新"}动态`,
+      type: scanComplete ? "fetch_completed" : "fetch_partial",
+      level: scanComplete ? "success" : "warning",
+      message: scanComplete
+        ? `已抓取 ${discoveredFeeds?.length || data.feeds.length} 条动态（${pagesFetched || 1} 页）`
+        : `已暂存 ${discoveredFeeds?.length || data.feeds.length} 条动态（${pagesFetched || 1} 页），下轮从第 ${scanCursor?.nextPage || 2} 页续抓`,
       topic: state.topics[index].tag,
       sourceKey: state.topics[index].sourceKey,
       createdAt: now,
     });
   } catch (error) {
     state.topics[index].lastError = error.message;
-    state.topics[index].lastFetchedAt = now;
+    state.topics[index].lastAttemptAt = now;
     appendArchiveEvent(archive, {
       type: "fetch_error",
       level: "error",
@@ -952,7 +1158,7 @@ async function refreshTopic(tag) {
   } finally {
     await Promise.all([saveState(), saveArchive()]);
   }
-  return state.topics[index];
+  return { topic: state.topics[index], discoveredFeeds: refreshedFeeds };
 }
 
 async function runMaintenance({ force = false } = {}) {
@@ -979,17 +1185,29 @@ async function pollAll() {
     state.lastPollAt = new Date().toISOString();
     state.nextPollAt = new Date(Date.now() + POLL_INTERVAL_MS).toISOString();
     const tags = state.topics.map((topic) => topic.tag);
+    const analysisBatches = [];
     for (const tag of tags) {
+      let discoveredFeeds = [];
       try {
-        await refreshTopic(tag);
-        const topic = state.topics.find((item) => item.tag === tag);
-        if (settings.ai.enabled && topic?.ai?.enabled && topic.ai.intent?.trim()) {
-          try { await analyzeTopicFeeds(tag, { force: false, notify: true }); }
-          catch (error) { runtime.lastAiError = error.message; console.error(`AI 分析“${tag}”失败：`, error.message); }
-        }
+        const refresh = await refreshTopic(tag);
+        discoveredFeeds = refresh.discoveredFeeds;
       } catch (error) {
         console.error(`刷新“${tag}”失败：`, error.message);
       }
+      const topic = state.topics.find((item) => item.tag === tag);
+      if (settings.ai.enabled && topic?.ai?.enabled && topic.ai.intent?.trim()) {
+        const retryFeeds = latestEvaluations(archive.evaluations)
+          .filter((item) => item.topic === tag && (item.status === "error" || item.notificationError))
+          .filter((item) => !item.nextRetryAt || new Date(item.nextRetryAt).getTime() <= Date.now())
+          .map((item) => archive.feeds[String(item.feedId)])
+          .filter(Boolean);
+        const feeds = [...new Map([...discoveredFeeds, ...retryFeeds].map((feed) => [String(feed.id), feed])).values()];
+        if (feeds.length) analysisBatches.push({ tag, feeds });
+      }
+    }
+    for (const batch of analysisBatches) {
+      try { await analyzeTopicFeeds(batch.tag, { force: false, notify: true, feeds: batch.feeds }); }
+      catch (error) { runtime.lastAiError = error.message; console.error(`AI 分析“${batch.tag}”失败：`, error.message); }
     }
     await Promise.all([saveState(), runMaintenance()]);
   })().finally(() => {
@@ -1137,9 +1355,18 @@ async function handleApi(request, response, url) {
   }
   if (request.method === "GET" && url.pathname === "/api/evaluations") {
     const tag = (url.searchParams.get("topic") || "").trim();
-    const limit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 100)));
-    const evaluations = archive.evaluations.filter((item) => !tag || item.topic === tag).slice(0, limit);
-    return sendJson(response, 200, { evaluations });
+    const statusFilter = url.searchParams.get("status") || "all";
+    const pageSize = Math.max(10, Math.min(500, Number(url.searchParams.get("pageSize") || url.searchParams.get("limit") || 200)));
+    const requestedPage = Math.max(1, Number(url.searchParams.get("page") || 1));
+    const records = latestEvaluations(archive.evaluations)
+      .map(currentEvaluation)
+      .filter((item) => !tag || item.topic === tag)
+      .filter((item) => statusFilter !== "matched" || item.matched);
+    const total = records.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const evaluations = records.slice((page - 1) * pageSize, page * pageSize);
+    return sendJson(response, 200, { evaluations, stats: evaluationSummary(archive.evaluations, topicsWithEffectiveThresholds()), total, page, pageSize, totalPages });
   }
   if (request.method === "GET" && url.pathname === "/api/archive/summary") {
     return sendJson(response, 200, { archive: archiveSummary(archive), retention: normalizeRetention(settings.retention) });
@@ -1154,6 +1381,21 @@ async function handleApi(request, response, url) {
       .sort((left, right) => new Date(right.lastSeenAt || right.createdAt || 0) - new Date(left.lastSeenAt || left.createdAt || 0))
       .slice(0, limit);
     return sendJson(response, 200, { feeds });
+  }
+  if (request.method === "GET" && url.pathname === "/api/dashboard/feeds") {
+    const topic = String(url.searchParams.get("topic") || "").trim();
+    if (topic && !state.topics.some((item) => item.tag === topic)) return sendJson(response, 404, { error: "未找到该监控话题" });
+    const result = queryArchiveFeeds(archive, {
+      topics: topicsWithEffectiveThresholds(),
+      topic,
+      monitoredOnly: true,
+      q: url.searchParams.get("q") || "",
+      aiStatus: url.searchParams.get("ai") || "all",
+      sort: url.searchParams.get("sort") || "created_desc",
+      page: url.searchParams.get("page") || 1,
+      pageSize: url.searchParams.get("pageSize") || 20,
+    });
+    return sendJson(response, 200, result);
   }
   if (request.method === "GET" && url.pathname === "/api/activity") {
     const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") || 100)));
@@ -1186,7 +1428,7 @@ async function handleApi(request, response, url) {
     return sendJson(response, 200, await fetchUserProfile(userMatch[1], { refresh }));
   }
   if (request.method === "GET" && url.pathname === "/api/topics") {
-    return sendJson(response, 200, { topics: state.topics });
+    return sendJson(response, 200, { topics: state.topics.map(publicTopicSnapshot) });
   }
   if (request.method === "GET" && url.pathname === "/api/topics/search") {
     const q = url.searchParams.get("q") || "";
@@ -1228,19 +1470,23 @@ async function handleApi(request, response, url) {
     const existing = state.topics.find((item) => item.sourceKey === data.sourceKey || item.tag === data.detail.tag);
     if (existing) return sendJson(response, 409, { error: "该监控源已在列表中", topic: existing });
     const now = new Date().toISOString();
+    const { discoveredFeeds, pagesFetched: _pagesFetched, scanComplete, scanError, scanCursor, ...topicData } = data;
+    const initialScanComplete = scanComplete !== false;
     const topic = {
-      tag: data.detail.tag || data.detail.title || cleanTag,
-      ...data,
-      fetch: normalizeTopicFetch(data.fetch),
+      tag: topicData.detail.tag || topicData.detail.title || cleanTag,
+      ...topicData,
+      fetch: normalizeTopicFetch(topicData.fetch),
       ai: { enabled: false, intent: "", threshold: null, notify: true, lastAnalyzedAt: null },
-      lastFetchedAt: now,
-      lastError: null,
+      scanCursor: scanCursor || null,
+      lastAttemptAt: now,
+      lastFetchedAt: initialScanComplete ? now : null,
+      lastError: initialScanComplete ? null : `${scanError || "首次扫描尚未完成"}；已保存本轮数据，将从第 ${scanCursor?.nextPage || 2} 页续抓`,
     };
     state.topics.unshift(topic);
-    (topic.feeds || []).forEach((feed) => archiveFeed(archive, feed, { topic: topic.tag, sourceKey: topic.sourceKey, now }));
+    (discoveredFeeds || topic.feeds || []).forEach((feed) => archiveFeed(archive, feed, { topic: topic.tag, sourceKey: topic.sourceKey, now }));
     appendArchiveEvent(archive, { type: "monitor_added", level: "success", message: `已添加监控：${topic.detail?.title || topic.tag}`, topic: topic.tag, sourceKey: topic.sourceKey, createdAt: now });
     await Promise.all([saveState(), saveArchive()]);
-    return sendJson(response, 201, { topic });
+    return sendJson(response, 201, { topic: publicTopicSnapshot(topic) });
   }
   if (request.method === "POST" && url.pathname === "/api/refresh") {
     await pollAll();
@@ -1299,7 +1545,7 @@ async function handleApi(request, response, url) {
       sourceKey: topic.sourceKey,
     });
     await Promise.all([saveState(), saveArchive()]);
-    return sendJson(response, 200, { topic });
+    return sendJson(response, 200, { topic: publicTopicSnapshot(topic) });
   }
   if (topicMatch && request.method === "DELETE") {
     const tag = decodeURIComponent(topicMatch[1]);

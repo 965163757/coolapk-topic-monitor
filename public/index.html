@@ -75,11 +75,11 @@
               <header class="feed-header" id="feedHeader"></header>
               <div class="table-toolbar">
                 <label class="table-search"><i class="ph ph-magnifying-glass"></i><input id="feedFilter" type="search" placeholder="筛选当前动态" /></label>
-                <div class="toolbar-filters"><button id="matchedFilter" type="button"><i class="ph ph-funnel"></i><span>全部状态</span></button><label class="toolbar-select"><i class="ph ph-arrows-down-up"></i><select id="sortOrder" aria-label="展示排序"><option value="created_desc">发布时间：最新</option><option value="created_asc">发布时间：最早</option><option value="updated_desc">最近回复</option><option value="popular_desc">互动热度</option><option value="ai_desc">AI 置信度</option></select></label></div>
+                <div class="toolbar-filters"><button id="matchedFilter" type="button"><i class="ph ph-funnel"></i><span>全部状态</span></button><label class="toolbar-select"><i class="ph ph-arrows-down-up"></i><select id="sortOrder" aria-label="展示排序"><option value="created_desc">发布时间：最新</option><option value="created_asc">发布时间：最早</option><option value="updated_desc">最近回复</option><option value="popular_desc">互动热度</option><option value="ai_desc">AI 匹配度</option></select></label></div>
               </div>
               <div class="feed-table-head" aria-hidden="true"><span>动态内容</span><span>所属话题</span><span>互动数据</span><span>AI 判断</span><span>发布时间</span><span></span></div>
               <div class="feed-list" id="feedList" aria-live="polite"></div>
-              <footer class="feed-footer"><span id="feedCount">等待加载内容</span><span id="archiveStatus"><i class="ph ph-database"></i> 归档准备中</span><span><i class="ph ph-check-circle"></i> 数据已同步</span></footer>
+              <footer class="feed-footer"><span id="feedCount">等待加载内容</span><div class="feed-pagination" id="feedPagination"><label>每页<select id="feedPageSize"><option value="20">20</option><option value="50">50</option><option value="100">100</option></select>条</label><button id="feedPrevious" type="button" aria-label="上一页"><i class="ph ph-caret-left"></i></button><span id="feedPageLabel">第 1 / 1 页</span><button id="feedNext" type="button" aria-label="下一页"><i class="ph ph-caret-right"></i></button></div><span id="archiveStatus"><i class="ph ph-database"></i> 归档准备中</span><span id="dataSyncStatus"><i class="ph ph-check-circle"></i> 数据已同步</span></footer>
             </section>
           </section>
 
@@ -136,7 +136,7 @@
 
           <section class="crm-view" id="aiView" data-view="ai" hidden>
             <section class="page-heading subpage-heading">
-              <div><p>MATCH HISTORY</p><h1>AI 命中记录</h1><span>集中查看判断理由、置信度与飞书投递状态。</span></div>
+              <div><p>MATCH HISTORY</p><h1>AI 命中记录</h1><span>集中查看匹配度、判断理由、阈值与飞书投递状态。</span></div>
               <button class="secondary-action" type="button" data-return-dashboard><i class="ph ph-arrow-left"></i>返回工作台</button>
             </section>
             <section class="sub-metric-grid" aria-label="AI 判断概览">
@@ -144,6 +144,10 @@
               <article><span class="green"><i class="ph ph-check-circle"></i></span><div><small>符合意图</small><strong id="aiMetricMatched">0</strong></div></article>
               <article><span class="blue"><i class="ph ph-paper-plane-tilt"></i></span><div><small>已发送通知</small><strong id="aiMetricNotified">0</strong></div></article>
             </section>
+            <aside class="ai-score-guide" aria-label="AI 匹配度说明">
+              <span><i class="ph ph-info"></i></span>
+              <div><strong>百分比表示“内容与关注意图的匹配程度”</strong><p>它不是模型准确率。匹配度达到该话题的当前阈值后，系统才会记为命中并进入飞书通知流程。</p></div>
+            </aside>
             <section class="workspace-page-card ai-page-card">
               <header class="workspace-page-head">
                 <span class="page-feature-icon amber"><i class="ph ph-sparkle"></i></span>
@@ -151,6 +155,7 @@
               </header>
               <div class="ai-history-filters"><button class="active" type="button" data-history-filter="matched">仅命中</button><button type="button" data-history-filter="all">全部判断</button></div>
               <div class="ai-history page-ai-history" id="aiHistory"></div>
+              <footer class="ai-history-footer"><span id="aiHistoryCount">等待加载判断记录</span><button class="secondary-button" id="loadMoreEvaluations" type="button">加载更多</button></footer>
             </section>
           </section>
 
@@ -174,7 +179,7 @@
                     <label class="field"><span>接口协议</span><select id="aiApiMode"><option value="auto">自动选择</option><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option><option value="gemini_generate_content">Gemini GenerateContent</option></select></label>
                     <label class="field"><span>推理强度</span><select id="aiReasoning"><option value="none">无</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
                     <label class="field field-wide"><span>API Key <small id="apiKeyHint"></small></span><input id="aiApiKey" type="password" autocomplete="new-password" placeholder="留空表示保留现有密钥" /></label>
-                    <label class="field"><span>默认命中阈值</span><input id="aiThreshold" type="number" min="0.1" max="1" step="0.01" /></label>
+                    <label class="field"><span>默认匹配阈值（%）</span><input id="aiThreshold" type="number" min="10" max="100" step="1" /><small>AI 匹配度达到该百分比时才算命中并进入通知流程。</small></label>
                     <label class="check-field"><input id="aiIncludeImages" type="checkbox" /><span>识别帖子图片中的价格和商品信息（模型不支持图片时自动采用文本判断）</span></label>
                   </div>
                   <div class="integration-actions"><button class="secondary-button" id="testAi" type="button"><i class="ph ph-plugs-connected"></i>测试 AI 连接</button><span id="aiTestStatus"></span></div>
@@ -224,8 +229,8 @@
       <form id="ruleForm" class="rule-form">
         <label class="rule-toggle"><span><strong>启用当前话题的 AI 筛选</strong><small>只分析之后抓取的新帖子，避免历史内容集中通知。</small></span><span class="switch"><input id="ruleEnabled" type="checkbox" /><span></span></span></label>
         <label class="field"><span>你真正想关注什么？</span><textarea id="ruleIntent" rows="6" maxlength="1200" placeholder="例如：只关注价格明显低于市场价的数码商品，尤其是电商平台临时 Bug 价、叠券异常价；排除求购、回收、广告和普通优惠。"></textarea><small class="field-help">写清商品、价格条件和排除项可显著降低误报。</small></label>
-        <div class="form-grid compact"><label class="field"><span>抓取排序</span><select id="fetchSort"><option value="dateline_desc">最新发布</option><option value="lastupdate_desc">最近回复</option><option value="popular">互动热度</option></select><small>每轮默认取前 10 条，并持续归档。</small></label><label class="field"><span>话题命中阈值</span><input id="ruleThreshold" type="number" min="0.1" max="1" step="0.01" placeholder="使用全局阈值" /></label><label class="check-field"><input id="ruleNotify" type="checkbox" /><span>命中后发送飞书通知</span></label></div>
-        <footer class="panel-dialog-actions"><span id="ruleSaveStatus"></span><button class="secondary-button" id="analyzeCurrent" type="button"><i class="ph ph-play"></i>分析当前 10 条</button><button class="primary-button" type="submit"><i class="ph ph-check"></i>保存规则</button></footer>
+        <div class="form-grid compact"><label class="field"><span>默认展示排序</span><select id="fetchSort"><option value="dateline_desc">最新发布</option><option value="lastupdate_desc">最近回复</option><option value="popular">互动热度</option></select><small>采集始终按发布时间增量进行，此项只控制默认查看顺序。</small></label><label class="field"><span>每轮采集上限</span><input id="fetchLimit" type="number" min="10" max="100" step="10" /><small>系统会向后翻页，直到遇到上次采集游标或达到上限。</small></label><label class="field"><span>话题匹配阈值（%）</span><input id="ruleThreshold" type="number" min="10" max="100" step="1" placeholder="继承全局阈值" /><small id="ruleThresholdHint">留空时继承系统默认阈值。</small></label><label class="check-field"><input id="ruleNotify" type="checkbox" /><span>命中后发送飞书通知</span></label></div>
+        <footer class="panel-dialog-actions"><span id="ruleSaveStatus"></span><button class="secondary-button" id="analyzeCurrent" type="button"><i class="ph ph-play"></i><span>分析当前数据</span></button><button class="primary-button" type="submit"><i class="ph ph-check"></i>保存规则</button></footer>
       </form>
     </dialog>
 
