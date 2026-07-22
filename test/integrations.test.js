@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
+import { buildFeishuFeedPost, clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
 import { isUnsupportedImageInputError } from "../lib/ai-compat.js";
 
 test("extractResponseText supports raw Responses API output", () => {
@@ -25,6 +25,30 @@ test("masks credentials and validates Feishu V2 hooks", () => {
   assert.equal(validateFeishuWebhook("https://open.feishu.cn/open-apis/bot/v2/hook/TOKEN"), true);
   assert.equal(validateFeishuWebhook("https://example.com/open-apis/bot/v2/hook/TOKEN"), false);
   assert.match(feishuSignature("secret", "1700000000"), /^[A-Za-z0-9+/]+=*$/);
+});
+
+test("builds Feishu notifications with content, pictures and reason only", () => {
+  const payload = buildFeishuFeedPost({
+    title: "Bug 价格商品",
+    message: "<p>商品正文<br>到手价 1 元</p>",
+    pictures: ["https://image.example/1.jpg", "https://image.example/2.jpg"],
+    username: "author",
+  }, {
+    reason: "价格明显低于正常水平",
+    matchScore: 0.99,
+    threshold: 0.72,
+    model: "MODEL",
+  });
+  assert.equal(payload.msg_type, "post");
+  assert.equal(payload.content.post.zh_cn.title, "Bug 价格商品");
+  assert.deepEqual(payload.content.post.zh_cn.content, [
+    [{ tag: "text", text: "商品正文\n到手价 1 元\n" }],
+    [{ tag: "a", text: "查看图片 1", href: "https://image.example/1.jpg" }],
+    [{ tag: "a", text: "查看图片 2", href: "https://image.example/2.jpg" }],
+    [{ tag: "text", text: "\n判断原因：价格明显低于正常水平" }],
+  ]);
+  const serialized = JSON.stringify(payload);
+  for (const hidden of ["author", "MODEL", "0.99", "0.72", "关注意图", "匹配度", "阈值"]) assert.equal(serialized.includes(hidden), false);
 });
 
 test("detects providers that reject image message parts", () => {

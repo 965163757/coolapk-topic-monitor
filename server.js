@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { MATCH_SCHEMA, clampThreshold, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
+import { MATCH_SCHEMA, buildFeishuFeedPost, clampThreshold, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
@@ -856,25 +856,9 @@ async function postFeishu(body) {
   return { sent: true };
 }
 
-async function sendFeishuNotification(topic, feed, evaluation) {
+async function sendFeishuNotification(feed, evaluation) {
   if (!settings.feishu.enabled) return { sent: false, skipped: true };
-  return postFeishu({
-    msg_type: "post",
-    content: {
-      post: {
-        zh_cn: {
-          title: `🎯 AI 命中：#${topic.tag}`,
-          content: [
-            [{ tag: "text", text: `${feed.title}\n` }],
-            [{ tag: "text", text: `作者：${feed.username}｜匹配度：${Math.round(evaluation.matchScore * 100)}%｜通知阈值：${Math.round(evaluation.threshold * 100)}%\n` }],
-            [{ tag: "text", text: `判断：${evaluation.reason}\n` }],
-            [{ tag: "text", text: `关注意图：${topic.ai.intent}\n` }],
-            [{ tag: "a", text: "查看酷安动态", href: feed.url }],
-          ],
-        },
-      },
-    },
-  });
+  return postFeishu(buildFeishuFeedPost(feed, evaluation));
 }
 
 async function testAiConnection() {
@@ -939,7 +923,7 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
         };
         if (evaluation.matched && notify && topic.ai.notify !== false) {
           try {
-            const sent = await sendFeishuNotification(topic, feed, evaluation);
+            const sent = await sendFeishuNotification(feed, evaluation);
             evaluation.notified = Boolean(sent.sent);
           } catch (error) {
             evaluation.notificationError = error.message;
