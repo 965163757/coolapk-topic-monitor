@@ -15,6 +15,7 @@ const STATE_FILE = join(ROOT, "data", "state.json");
 const SETTINGS_FILE = join(ROOT, "data", "settings.json");
 const ARCHIVE_FILE = join(ROOT, "data", "archive.json");
 const PORT = Number(process.env.PORT || 4173);
+const HOST = process.env.HOST || "127.0.0.1";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 5 * 60 * 1000);
 const FEED_LIMIT = 20;
 const MAX_FETCH_LIMIT = 100;
@@ -1559,8 +1560,8 @@ await loadState();
 await loadSettings();
 await loadArchive();
 state.nextPollAt = new Date(Date.now() + POLL_INTERVAL_MS).toISOString();
-server.listen(PORT, () => {
-  console.log(`酷安话题监控已启动：http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`酷安话题监控已启动：http://${HOST}:${PORT}`);
   void pollAll();
 });
 
