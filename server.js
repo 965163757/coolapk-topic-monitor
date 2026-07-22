@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { MATCH_SCHEMA, buildFeishuFeedPost, clampThreshold, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
+import { MATCH_SCHEMA, buildFeishuFeedNotification, clampThreshold, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
@@ -858,7 +858,7 @@ async function postFeishu(body) {
 
 async function sendFeishuNotification(feed, evaluation) {
   if (!settings.feishu.enabled) return { sent: false, skipped: true };
-  return postFeishu(buildFeishuFeedPost(feed, evaluation));
+  return postFeishu(buildFeishuFeedNotification(feed, evaluation));
 }
 
 async function testAiConnection() {

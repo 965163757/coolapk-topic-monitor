@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildFeishuFeedPost, clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
+import { buildFeishuFeedNotification, clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
 import { isUnsupportedImageInputError } from "../lib/ai-compat.js";
 
 test("extractResponseText supports raw Responses API output", () => {
@@ -28,10 +28,12 @@ test("masks credentials and validates Feishu V2 hooks", () => {
 });
 
 test("builds Feishu notifications with content, pictures and reason only", () => {
-  const payload = buildFeishuFeedPost({
+  const payload = buildFeishuFeedNotification({
+    id: "12345",
     title: "Bug 价格商品",
     message: "<p>商品正文<br>到手价 1 元</p>",
     pictures: ["https://image.example/1.jpg", "https://image.example/2.jpg"],
+    url: "https://www.coolapk.com/feed/12345",
     username: "author",
   }, {
     reason: "价格明显低于正常水平",
@@ -39,16 +41,27 @@ test("builds Feishu notifications with content, pictures and reason only", () =>
     threshold: 0.72,
     model: "MODEL",
   });
-  assert.equal(payload.msg_type, "post");
-  assert.equal(payload.content.post.zh_cn.title, "Bug 价格商品");
-  assert.deepEqual(payload.content.post.zh_cn.content, [
-    [{ tag: "text", text: "商品正文\n到手价 1 元\n" }],
-    [{ tag: "a", text: "查看图片 1", href: "https://image.example/1.jpg" }],
-    [{ tag: "a", text: "查看图片 2", href: "https://image.example/2.jpg" }],
-    [{ tag: "text", text: "\n判断原因：价格明显低于正常水平" }],
-  ]);
+  assert.equal(payload.msg_type, "interactive");
+  assert.equal(payload.card.header.title.content, "Bug 价格商品");
+  assert.equal(payload.card.elements[0].text.content, "商品正文\n到手价 1 元");
+  assert.deepEqual(payload.card.elements[1].actions[0].multi_url, {
+    url: "https://www.coolapk.com/feed/12345",
+    android_url: "coolmarket://feed/12345",
+    ios_url: "https://www.coolapk.com/feed/12345",
+    pc_url: "https://www.coolapk.com/feed/12345",
+  });
+  assert.equal(payload.card.elements[2].text.content, "[查看图片 1](https://image.example/1.jpg)　｜　[查看图片 2](https://image.example/2.jpg)");
+  assert.equal(payload.card.elements[4].text.content, "**判断原因**\n价格明显低于正常水平");
   const serialized = JSON.stringify(payload);
   for (const hidden of ["author", "MODEL", "0.99", "0.72", "关注意图", "匹配度", "阈值"]) assert.equal(serialized.includes(hidden), false);
+});
+
+test("builds a fallback Coolapk app link from the feed id", () => {
+  const payload = buildFeishuFeedNotification({ id: 67890, title: "标题", message: "正文" }, { reason: "原因" });
+  const links = payload.card.elements[1].actions;
+  assert.equal(links[0].multi_url.android_url, "coolmarket://feed/67890");
+  assert.equal(links[0].multi_url.url, "https://www.coolapk.com/feed/67890");
+  assert.equal(links[1].url, "https://www.coolapk.com/feed/67890");
 });
 
 test("detects providers that reject image message parts", () => {
