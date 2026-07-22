@@ -1041,6 +1041,7 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
           sourceKey: topic.sourceKey || "",
           status: "completed",
           notified: false,
+          deliveryPending: Boolean((keywordMatched || raw.matchScore >= threshold) && topic.ai.notify !== false && settings.feishu.enabled),
           notificationError: null,
           evaluatedAt: new Date().toISOString(),
         };
@@ -1048,8 +1049,10 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
           try {
             const sent = await sendFeishuNotification(feed, evaluation);
             evaluation.notified = Boolean(sent.sent);
+            if (evaluation.notified) evaluation.deliveryPending = false;
           } catch (error) {
             evaluation.notificationError = error.message;
+            evaluation.deliveryPending = true;
             evaluation.nextRetryAt = new Date(Date.now() + 5 * 60_000).toISOString();
           }
         }

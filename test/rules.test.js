@@ -20,8 +20,9 @@ test("chunks AI work into bounded request batches", () => {
 
 test("keeps matched but unsent records pending for topic notifications", () => {
   const topic = { ai: { notify: true } };
-  assert.equal(requiresNotification({ status: "completed", matched: true, notified: false }, topic, true), true);
+  assert.equal(requiresNotification({ status: "completed", matched: true, notified: false, deliveryPending: true }, topic, true), true);
+  assert.equal(requiresNotification({ status: "completed", matched: true, notified: false }, topic, true), false);
   assert.equal(requiresNotification({ status: "completed", matched: true, notified: true }, topic, true), false);
   assert.equal(requiresNotification({ status: "completed", matched: false, notified: false }, topic, true), false);
-  assert.equal(requiresNotification({ status: "completed", matched: true, notified: false }, topic, false), false);
+  assert.equal(requiresNotification({ status: "completed", matched: true, notified: false, deliveryPending: true }, topic, false), false);
 });
