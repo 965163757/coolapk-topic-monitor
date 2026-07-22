@@ -363,10 +363,18 @@ dialog::backdrop { background: rgba(14, 27, 19, .54); backdrop-filter: blur(2px)
 .rule-form > .field, .rule-form > .form-grid { margin: 18px 21px; }
 .rule-form > .panel-dialog-actions { margin-top: 20px; }
 
-.ai-history-filters { display: flex; gap: 5px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.ai-history-filters { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.ai-history-filters > div { display: flex; gap: 5px; }
+.ai-history-filters label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--type-caption); }
+.ai-history-filters select { min-width: 170px; height: 34px; padding: 0 30px 0 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--surface); color: var(--ink); font: inherit; }
 .ai-history-filters button { height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #7a867e; font-size: 9px; }
 .ai-history-filters button.active { background: #eaf6ee; color: var(--green); font-weight: 600; }
 .ai-history { max-height: 620px; overflow-y: auto; }
+.history-topic-group + .history-topic-group { border-top: 8px solid var(--canvas); }
+.history-topic-group > header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; min-height: 42px; padding: 0 21px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.96); color: var(--ink); }
+.history-topic-group > header span { display: flex; align-items: center; gap: 7px; font-size: var(--type-control); font-weight: 700; }
+.history-topic-group > header i { color: var(--green); }
+.history-topic-group > header b { color: var(--muted); font-size: var(--type-caption); font-weight: 600; }
 .history-item { display: grid; grid-template-columns: 34px minmax(0,1fr) auto; gap: 11px; padding: 14px 19px; border-bottom: 1px solid var(--line); }
 .history-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; background: #e9f6ee; color: var(--green); }
 .history-item.miss .history-icon { background: #f0f2f1; color: #77827b; }
@@ -870,6 +878,9 @@ body {
 }
 
 @media (max-width: 760px) {
+  .ai-history-filters { align-items: stretch; flex-direction: column; }
+  .ai-history-filters label { justify-content: space-between; }
+  .ai-history-filters select { flex: 1; min-width: 0; }
   .feed-pagination label { font-size: 11.5px; }
   .feed-pagination select, .feed-pagination button { height: 36px; }
   .feed-pagination button { width: 36px; }

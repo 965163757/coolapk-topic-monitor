@@ -44,7 +44,8 @@ npm start
 - 归档工作台分页、每页 20/50/100 条、全库关键词与 AI 命中筛选
 - 三栏拖拽调宽、键盘调宽、布局本地记忆
 - 站内动态详情、分页评论、图片代理与可缩放/拖动画廊
-- 每话题独立 AI 关注意图、匹配阈值、通知开关；空阈值继承全局设置
+- 每话题独立关键词、AI 关注意图、匹配阈值和通知开关；关键词命中可直接推送飞书
+- AI 默认按每批 8 条合并识别，兼容失败或结果遗漏时自动回退到单条判断
 - OpenAI Responses API 结构化判断，可选低清图片联合识别
 - OpenAI、Anthropic Messages、Gemini GenerateContent 与 OpenAI 兼容接口的自动适配
 - 飞书 V2 Webhook、可选签名校验、测试通知；命中推送包含帖子标题、正文、酷安 App/网页跳转、图片入口与判断原因
@@ -77,7 +78,7 @@ npm start
 - `DELETE /api/topics/:tag`：停止监控
 - `POST /api/topics/:tag/analyze`：手动分析当前动态
 - `GET /api/topics/search?q=关键词`：搜索话题
-- `GET /api/evaluations?page=1&pageSize=50&status=matched|all`：去重后的当前 AI 判断、分页记录与聚合统计
+- `GET /api/evaluations?page=1&pageSize=50&status=matched|all&topic=话题名`：按话题筛选、去重后的当前判断、分页记录与聚合统计
 - `GET /api/feeds/:id`：动态完整详情及第一页评论
 - `GET /api/feeds/:id/replies?page=2`：分页评论
 - `GET /api/image?url=图片地址`：酷安图片代理

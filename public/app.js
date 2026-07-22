@@ -41,6 +41,7 @@ let activeTopicTag = "";
 let activeFeedId = "";
 let activeDetail = null;
 let historyFilter = "matched";
+let historyTopicFilter = "";
 let feedFilterValue = "";
 let feedAiFilter = "all";
 let feedSortOrder = "created_desc";
@@ -189,6 +190,13 @@ function renderSidebar() {
         <i class="topic-bullet"></i><span class="topic-item-label">${escapeHtml(topic.detail?.title || topic.tag)}</span><span class="topic-item-count">${topicMatches ? `${topicMatches} 命中` : numberFormat.format(topic.archiveCount ?? topic.feeds?.length ?? 0)}</span>
       </button>`;
     }).join("")}`;
+  const historyTopicSelect = $("#historyTopicFilter");
+  if (historyTopicSelect) {
+    const options = topics.map((topic) => `<option value="${escapeHtml(topic.tag)}">${escapeHtml(topic.detail?.title || topic.tag)}</option>`).join("");
+    historyTopicSelect.innerHTML = `<option value="">全部话题</option>${options}`;
+    if (topics.some((topic) => topic.tag === historyTopicFilter)) historyTopicSelect.value = historyTopicFilter;
+    else historyTopicFilter = "";
+  }
 }
 
 function renderMetrics() {
@@ -262,11 +270,12 @@ function renderFeed() {
       <div class="feed-header-actions"><button class="ai-rule-button active" type="button" data-open-search><i class="ph ph-plus"></i><span>添加监控</span></button></div>`;
   } else {
     const detail = topic.detail || { title: topic.tag };
-    const aiActive = topic.ai?.enabled && topic.ai?.intent;
+    const keywordCount = topic.ai?.keywords?.length || 0;
+    const aiActive = (topic.ai?.enabled && topic.ai?.intent) || keywordCount;
     feedHeader.innerHTML = `
-      <div class="feed-heading"><span class="feed-eyebrow">ACTIVE WATCH</span><h1>${escapeHtml(detail.title || topic.tag)} <span class="live-label">监控中</span></h1><p>已归档 ${numberFormat.format(topic.archiveCount ?? dashboardFeedMeta.total ?? 0)} 条 · 本轮缓存 ${numberFormat.format(topic.currentFeedCount ?? topic.feeds?.length ?? 0)} 条 · 默认${fetchSortLabel(topic.fetch?.sort)}${aiActive ? " · AI 筛选已开启" : ""}</p></div>
+      <div class="feed-heading"><span class="feed-eyebrow">ACTIVE WATCH</span><h1>${escapeHtml(detail.title || topic.tag)} <span class="live-label">监控中</span></h1><p>已归档 ${numberFormat.format(topic.archiveCount ?? dashboardFeedMeta.total ?? 0)} 条 · 本轮缓存 ${numberFormat.format(topic.currentFeedCount ?? topic.feeds?.length ?? 0)} 条 · 默认${fetchSortLabel(topic.fetch?.sort)}${keywordCount ? ` · ${keywordCount} 个关键词` : ""}${topic.ai?.enabled ? " · AI 筛选已开启" : ""}</p></div>
       <div class="feed-header-actions">
-        <button class="ai-rule-button ${aiActive ? "active" : ""}" type="button" id="openRule"><i class="ph ph-sparkle"></i><span>${aiActive ? "AI 规则" : "配置 AI"}</span></button>
+        <button class="ai-rule-button ${aiActive ? "active" : ""}" type="button" id="openRule"><i class="ph ph-sparkle"></i><span>${aiActive ? "监控规则" : "配置规则"}</span></button>
         <button type="button" id="removeTopic" title="停止监控" aria-label="停止监控"><i class="ph ph-trash"></i><span>停止监控</span></button>
       </div>`;
   }
@@ -519,6 +528,7 @@ async function loadSettings() {
   $("#aiApiMode").value = settingsSnapshot.ai.apiMode || "auto";
   $("#aiReasoning").value = settingsSnapshot.ai.reasoningEffort;
   $("#aiThreshold").value = Math.round(settingsSnapshot.ai.threshold * 100);
+  $("#aiBatchSize").value = settingsSnapshot.ai.batchSize || 8;
   $("#aiIncludeImages").checked = settingsSnapshot.ai.includeImages;
   $("#aiApiKey").value = "";
   $("#apiKeyHint").textContent = settingsSnapshot.ai.configured ? `已配置：${settingsSnapshot.ai.apiKeyMasked}` : "尚未配置";
@@ -557,6 +567,7 @@ function settingsPayload() {
       apiMode: $("#aiApiMode").value,
       reasoningEffort: $("#aiReasoning").value,
       threshold: Number($("#aiThreshold").value) / 100,
+      batchSize: Number($("#aiBatchSize").value) || 8,
       includeImages: $("#aiIncludeImages").checked,
       apiKey: $("#aiApiKey").value.trim(),
     },
@@ -607,6 +618,7 @@ function showRuleDialog() {
   $("#ruleTopicName").textContent = `#${topic.tag} · 定义真正值得提醒的内容`;
   $("#ruleEnabled").checked = Boolean(topic.ai?.enabled);
   $("#ruleIntent").value = topic.ai?.intent || "";
+  $("#ruleKeywords").value = (topic.ai?.keywords || []).join("\n");
   $("#ruleThreshold").value = topic.ai?.threshold == null ? "" : Math.round(topic.ai.threshold * 100);
   const effectiveThreshold = topic.ai?.effectiveThreshold ?? settingsSnapshot?.ai?.threshold ?? 0.72;
   $("#ruleThresholdHint").textContent = topic.ai?.threshold == null
@@ -627,6 +639,7 @@ async function saveRule() {
     ai: {
       enabled: $("#ruleEnabled").checked,
       intent: $("#ruleIntent").value.trim(),
+      keywords: $("#ruleKeywords").value,
       threshold: $("#ruleThreshold").value === "" ? "" : Number($("#ruleThreshold").value) / 100,
       notify: $("#ruleNotify").checked,
     },
@@ -639,7 +652,7 @@ async function saveRule() {
     $("#ruleSaveStatus").textContent = "规则已保存";
     renderSidebar();
     renderFeed();
-    toast(`#${topic.tag} 的 AI 规则已保存`);
+    toast(`#${topic.tag} 的关键词与 AI 规则已保存`);
     return true;
   } catch (error) {
     $("#ruleSaveStatus").textContent = error.message;
@@ -648,25 +661,36 @@ async function saveRule() {
   }
 }
 
+function historyItemMarkup(item) {
+  const stateClass = item.status === "error" ? "error" : item.matched ? "" : "miss";
+  const icon = item.status === "error" ? "ph-warning" : item.matchSource === "keyword" ? "ph-key" : item.matched ? "ph-sparkle" : "ph-check";
+  const delivery = item.status === "error" ? "等待重试" : item.notified ? "已通知" : item.notificationError ? "通知失败" : item.matched ? "未通知" : "";
+  const metric = evaluationMetric(item);
+  const metricText = item.status === "error" ? "判断失败" : item.matchSource === "keyword" ? "关键词命中" : metric ? `${metric.label} ${Math.round(metric.value * 100)}%` : "暂无评分";
+  const threshold = evaluationThreshold(item);
+  const thresholdText = item.status === "error" || threshold == null || item.matchSource === "keyword" ? "" : ` · 当前阈值 ${Math.round(threshold * 100)}%`;
+  const processing = item.matchSource === "keyword"
+    ? '<small class="ai-input-note"><i class="ph ph-key"></i> 本地关键词规则直接命中</small>'
+    : item.batchSize > 1 ? `<small class="ai-input-note"><i class="ph ph-stack"></i> ${item.batchSize} 条批量识别</small>` : "";
+  return `<article class="history-item ${stateClass}">
+    <span class="history-icon"><i class="ph ${icon}"></i></span>
+    <div class="history-main"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.reason)}</p>${processing}${metric?.legacy ? '<small class="ai-input-note"><i class="ph ph-info"></i> 旧版评分口径</small>' : ""}${item.imageFallback ? '<small class="ai-input-note"><i class="ph ph-text-t"></i> 批量任务已按文本完成判断</small>' : ""}${item.compatibilityFallback ? '<small class="ai-input-note"><i class="ph ph-plugs-connected"></i> 已自动切换兼容请求格式</small>' : ""}</div>
+    <div class="history-meta"><b>${metricText}</b><span>${thresholdText}${delivery ? `${thresholdText ? " · " : ""}${delivery}` : ""}</span><time>${item.evaluatedAt ? `<br>${dateTimeFormat.format(new Date(item.evaluatedAt))}` : ""}</time></div>
+  </article>`;
+}
+
 function renderAiHistory() {
   $("#aiMetricTotal").textContent = numberFormat.format(evaluationStats.total ?? evaluations.length);
   $("#aiMetricMatched").textContent = numberFormat.format(evaluationStats.matched ?? evaluations.filter((item) => item.matched).length);
   $("#aiMetricNotified").textContent = numberFormat.format(evaluationStats.notified ?? evaluations.filter((item) => item.notified).length);
   const rows = historyEvaluations;
-  aiHistory.innerHTML = rows.length ? rows.map((item) => {
-    const stateClass = item.status === "error" ? "error" : item.matched ? "" : "miss";
-    const icon = item.status === "error" ? "ph-warning" : item.matched ? "ph-sparkle" : "ph-check";
-    const delivery = item.status === "error" ? "等待重试" : item.notified ? "已通知" : item.notificationError ? "通知失败" : item.matched ? "未通知" : "";
-    const metric = evaluationMetric(item);
-    const metricText = item.status === "error" ? "判断失败" : metric ? `${metric.label} ${Math.round(metric.value * 100)}%` : "暂无评分";
-    const threshold = evaluationThreshold(item);
-    const thresholdText = item.status === "error" || threshold == null ? "" : ` · 当前阈值 ${Math.round(threshold * 100)}%`;
-    return `<article class="history-item ${stateClass}">
-      <span class="history-icon"><i class="ph ${icon}"></i></span>
-      <div class="history-main"><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.reason)}</p>${metric?.legacy ? '<small class="ai-input-note"><i class="ph ph-info"></i> 旧版评分口径</small>' : ""}${item.imageFallback ? '<small class="ai-input-note"><i class="ph ph-text-t"></i> 已按文本完成判断</small>' : ""}${item.compatibilityFallback ? '<small class="ai-input-note"><i class="ph ph-plugs-connected"></i> 已自动切换兼容请求格式</small>' : ""}</div>
-      <div class="history-meta"><b>${metricText}</b><span>${thresholdText}${delivery ? `${thresholdText ? " · " : ""}${delivery}` : ""}</span><time>${item.evaluatedAt ? `<br>${dateTimeFormat.format(new Date(item.evaluatedAt))}` : ""}</time></div>
-    </article>`;
-  }).join("") : `<div class="page-empty-state"><span><i class="ph ph-sparkle"></i></span><h3>${historyFilter === "matched" ? "还没有 AI 命中" : "还没有判断记录"}</h3><p>启用 AI 并设置话题关注意图后，新抓取的动态会自动进入这里。</p><button type="button" data-open-settings><i class="ph ph-gear-six"></i>配置 AI 连接</button></div>`;
+  const groups = new Map();
+  for (const item of rows) {
+    const tag = item.topic || "未分类话题";
+    if (!groups.has(tag)) groups.set(tag, []);
+    groups.get(tag).push(item);
+  }
+  aiHistory.innerHTML = rows.length ? [...groups].map(([tag, items]) => `<section class="history-topic-group"><header><span><i class="ph ph-hash"></i>${escapeHtml(tag)}</span><b>${items.length} 条</b></header>${items.map(historyItemMarkup).join("")}</section>`).join("") : `<div class="page-empty-state"><span><i class="ph ph-sparkle"></i></span><h3>${historyFilter === "matched" ? "当前话题还没有命中" : "当前话题还没有判断记录"}</h3><p>配置关键词或启用 AI 关注意图后，新抓取的动态会自动进入这里。</p><button type="button" data-open-settings><i class="ph ph-gear-six"></i>配置 AI 连接</button></div>`;
   $("#aiHistoryCount").textContent = `已显示 ${numberFormat.format(rows.length)} / ${numberFormat.format(historyMeta.total || 0)} 条当前判断`;
   $("#loadMoreEvaluations").hidden = historyMeta.page >= historyMeta.totalPages;
 }
@@ -679,6 +703,7 @@ async function loadAiHistory({ reset = false, page = null } = {}) {
   if (reset) aiHistory.innerHTML = '<div class="detail-loading">正在加载判断记录…</div>';
   try {
     const params = new URLSearchParams({ page: String(targetPage), pageSize: String(historyMeta.pageSize), status: historyFilter });
+    if (historyTopicFilter) params.set("topic", historyTopicFilter);
     const payload = await api(`/api/evaluations?${params}`);
     if (sequence !== historyLoadSequence) return;
     evaluationStats = payload.stats || evaluationStats;
@@ -960,7 +985,7 @@ $("#analyzeCurrent").addEventListener("click", async () => {
   if (!topic || !(await saveRule())) return;
   button.disabled = true;
   button.innerHTML = '<i class="ph ph-circle-notch"></i> AI 分析中';
-  $("#ruleSaveStatus").textContent = "逐条判断当前内容，可能需要一些时间…";
+  $("#ruleSaveStatus").textContent = "正在批量判断当前内容…";
   try {
     const result = await api(`/api/topics/${encodeURIComponent(topic.tag)}/analyze`, { method: "POST", body: JSON.stringify({ force: true, notify: false }) });
     const keys = new Set(result.evaluations.map((item) => `${item.topic}\u0000${item.feedId}`));
@@ -977,6 +1002,10 @@ $$('[data-history-filter]').forEach((button) => button.addEventListener("click",
   $$('[data-history-filter]').forEach((item) => item.classList.toggle("active", item === button));
   void loadAiHistory({ reset: true });
 }));
+$("#historyTopicFilter").addEventListener("change", () => {
+  historyTopicFilter = $("#historyTopicFilter").value;
+  void loadAiHistory({ reset: true });
+});
 $("#loadMoreEvaluations").addEventListener("click", () => {
   if (historyMeta.page >= historyMeta.totalPages) return;
   void loadAiHistory({ page: historyMeta.page + 1 });

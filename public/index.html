@@ -153,7 +153,7 @@
                 <span class="page-feature-icon amber"><i class="ph ph-sparkle"></i></span>
                 <div><h2>内容判断流水</h2><p>数据按最新判断时间排列，可切换全部结果与仅命中。</p></div>
               </header>
-              <div class="ai-history-filters"><button class="active" type="button" data-history-filter="matched">仅命中</button><button type="button" data-history-filter="all">全部判断</button></div>
+              <div class="ai-history-filters"><div><button class="active" type="button" data-history-filter="matched">仅命中</button><button type="button" data-history-filter="all">全部判断</button></div><label><span>话题</span><select id="historyTopicFilter"><option value="">全部话题</option></select></label></div>
               <div class="ai-history page-ai-history" id="aiHistory"></div>
               <footer class="ai-history-footer"><span id="aiHistoryCount">等待加载判断记录</span><button class="secondary-button" id="loadMoreEvaluations" type="button">加载更多</button></footer>
             </section>
@@ -180,6 +180,7 @@
                     <label class="field"><span>推理强度</span><select id="aiReasoning"><option value="none">无</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
                     <label class="field field-wide"><span>API Key <small id="apiKeyHint"></small></span><input id="aiApiKey" type="password" autocomplete="new-password" placeholder="留空表示保留现有密钥" /></label>
                     <label class="field"><span>默认匹配阈值（%）</span><input id="aiThreshold" type="number" min="10" max="100" step="1" /><small>AI 匹配度达到该百分比时才算命中并进入通知流程。</small></label>
+                    <label class="field"><span>AI 批量条数</span><input id="aiBatchSize" type="number" min="1" max="20" step="1" /><small>一次请求判断多条帖子；默认 8 条，接口不兼容时自动逐条回退。</small></label>
                     <label class="check-field"><input id="aiIncludeImages" type="checkbox" /><span>识别帖子图片中的价格和商品信息（模型不支持图片时自动采用文本判断）</span></label>
                   </div>
                   <div class="integration-actions"><button class="secondary-button" id="testAi" type="button"><i class="ph ph-plugs-connected"></i>测试 AI 连接</button><span id="aiTestStatus"></span></div>
@@ -198,7 +199,7 @@
                   <div class="integration-actions"><button class="secondary-button" id="runCleanup" type="button"><i class="ph ph-broom"></i>立即清理过期数据</button><span id="cleanupStatus"></span></div>
                 </section>
                 <section class="settings-section">
-                  <div class="settings-section-title"><span class="settings-icon feishu"><i class="ph ph-paper-plane-tilt"></i></span><div><h3>飞书通知</h3><p>AI 命中关注意图后，通过 V2 自定义机器人推送。</p></div><label class="switch"><input id="feishuEnabled" type="checkbox" /><span></span></label></div>
+                  <div class="settings-section-title"><span class="settings-icon feishu"><i class="ph ph-paper-plane-tilt"></i></span><div><h3>飞书通知</h3><p>关键词或 AI 命中当前话题规则后，通过 V2 自定义机器人推送。</p></div><label class="switch"><input id="feishuEnabled" type="checkbox" /><span></span></label></div>
                   <div class="form-grid">
                     <label class="field field-wide"><span>Webhook <small id="webhookHint"></small></span><input id="feishuWebhook" type="password" autocomplete="new-password" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." /></label>
                     <label class="field field-wide"><span>签名密钥（可选） <small id="secretHint"></small></span><input id="feishuSecret" type="password" autocomplete="new-password" placeholder="留空表示保留现有密钥" /></label>
@@ -223,11 +224,12 @@
 
     <dialog class="panel-dialog rule-dialog" id="ruleDialog">
       <header class="panel-dialog-head">
-        <div><span class="panel-kicker">TOPIC INTELLIGENCE</span><h2>AI 关注意图</h2><p id="ruleTopicName">为当前话题定义真正值得提醒的内容。</p></div>
+        <div><span class="panel-kicker">TOPIC INTELLIGENCE</span><h2>关键词与 AI 规则</h2><p id="ruleTopicName">为当前话题定义真正值得提醒的内容。</p></div>
         <button type="button" data-close-dialog="ruleDialog" aria-label="关闭 AI 规则"><i class="ph ph-x"></i></button>
       </header>
       <form id="ruleForm" class="rule-form">
-        <label class="rule-toggle"><span><strong>启用当前话题的 AI 筛选</strong><small>只分析之后抓取的新帖子，避免历史内容集中通知。</small></span><span class="switch"><input id="ruleEnabled" type="checkbox" /><span></span></span></label>
+        <label class="rule-toggle"><span><strong>启用当前话题的 AI 筛选</strong><small>未被关键词直接命中的帖子，将按批次进入 AI 语义判断。</small></span><span class="switch"><input id="ruleEnabled" type="checkbox" /><span></span></span></label>
+        <label class="field"><span>命中即推送的关键词</span><textarea id="ruleKeywords" rows="3" maxlength="2000" placeholder="例如：Bug价、免费、0元；支持逗号或换行分隔"></textarea><small class="field-help">标题或正文命中任意关键词即视为符合规则，无需等待 AI；每个话题独立配置。</small></label>
         <label class="field"><span>你真正想关注什么？</span><textarea id="ruleIntent" rows="6" maxlength="1200" placeholder="例如：只关注价格明显低于市场价的数码商品，尤其是电商平台临时 Bug 价、叠券异常价；排除求购、回收、广告和普通优惠。"></textarea><small class="field-help">写清商品、价格条件和排除项可显著降低误报。</small></label>
         <div class="form-grid compact"><label class="field"><span>默认展示排序</span><select id="fetchSort"><option value="dateline_desc">最新发布</option><option value="lastupdate_desc">最近回复</option><option value="popular">互动热度</option></select><small>采集始终按发布时间增量进行，此项只控制默认查看顺序。</small></label><label class="field"><span>每轮采集上限</span><input id="fetchLimit" type="number" min="10" max="100" step="10" /><small>系统会向后翻页，直到遇到上次采集游标或达到上限。</small></label><label class="field"><span>话题匹配阈值（%）</span><input id="ruleThreshold" type="number" min="10" max="100" step="1" placeholder="继承全局阈值" /><small id="ruleThresholdHint">留空时继承系统默认阈值。</small></label><label class="check-field"><input id="ruleNotify" type="checkbox" /><span>命中后发送飞书通知</span></label></div>
         <footer class="panel-dialog-actions"><span id="ruleSaveStatus"></span><button class="secondary-button" id="analyzeCurrent" type="button"><i class="ph ph-play"></i><span>分析当前数据</span></button><button class="primary-button" type="submit"><i class="ph ph-check"></i>保存规则</button></footer>

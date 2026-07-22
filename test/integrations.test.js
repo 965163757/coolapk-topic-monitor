@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildFeishuFeedNotification, clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
+import { buildFeishuFeedNotification, clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeBatchMatchResults, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
 import { isUnsupportedImageInputError } from "../lib/ai-compat.js";
 
 test("extractResponseText supports raw Responses API output", () => {
@@ -18,6 +18,17 @@ test("normalizes match values and thresholds", () => {
   assert.equal(clampThreshold("bad"), 0.72);
   assert.equal(clampThreshold(null, 0.72), 0.72);
   assert.equal(clampThreshold("", 0.8), 0.8);
+});
+
+test("normalizes provider-tolerant AI batch results by feed id", () => {
+  const results = normalizeBatchMatchResults({ results: [
+    { feedId: "101", matchScore: 0.91, reason: "命中", evidence: ["价格异常"] },
+    { feed_id: 102, score: "35%", reason: "普通优惠", evidence: [] },
+    { feedId: "not-requested", matchScore: 1, reason: "忽略", evidence: [] },
+  ] }, ["101", "102"]);
+  assert.equal(results.get("101").matchScore, 0.91);
+  assert.equal(results.get("102").matchScore, 0.35);
+  assert.equal(results.has("not-requested"), false);
 });
 
 test("masks credentials and validates Feishu V2 hooks", () => {

@@ -4,10 +4,11 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { MATCH_SCHEMA, buildFeishuFeedNotification, clampThreshold, feishuSignature, maskSecret, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
+import { BATCH_MATCH_SCHEMA, MATCH_SCHEMA, buildFeishuFeedNotification, clampThreshold, feishuSignature, maskSecret, normalizeBatchMatchResults, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
+import { chunkItems, matchFeedKeywords, normalizeKeywords } from "./lib/rules.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -46,6 +47,7 @@ const defaultSettings = {
     reasoningEffort: "low",
     includeImages: true,
     threshold: 0.72,
+    batchSize: 8,
   },
   feishu: {
     enabled: false,
@@ -566,6 +568,10 @@ function effectiveTopicThreshold(topic) {
   return clampThreshold(topic?.ai?.threshold, clampThreshold(settings.ai.threshold));
 }
 
+function topicHasRules(topic) {
+  return normalizeKeywords(topic?.ai?.keywords).length > 0 || Boolean(settings.ai.enabled && topic?.ai?.enabled && topic.ai.intent?.trim());
+}
+
 function topicsWithEffectiveThresholds() {
   return state.topics.map((topic) => ({ ...topic, effectiveThreshold: effectiveTopicThreshold(topic) }));
 }
@@ -590,6 +596,7 @@ function publicSettings() {
       reasoningEffort: settings.ai.reasoningEffort,
       includeImages: Boolean(settings.ai.includeImages),
       threshold: clampThreshold(settings.ai.threshold),
+      batchSize: Math.max(1, Math.min(20, Number(process.env.AI_BATCH_SIZE || settings.ai.batchSize) || 8)),
       configured: Boolean(ai.apiKey),
       apiKeyMasked: maskSecret(ai.apiKey),
       keySource: process.env.OPENAI_API_KEY ? "environment" : ai.apiKey ? "settings" : "none",
@@ -689,8 +696,10 @@ function aiImageCapabilityKey(ai) {
   return `${String(ai.baseUrl || "").replace(/\/+$/, "").toLowerCase()}|${String(ai.model || "").toLowerCase()}|${normalizeAiProvider(ai.provider)}|${normalizeAiApiMode(ai.apiMode)}`;
 }
 
-function classificationBodies(ai, prompt, imageUrls) {
-  const systemInstruction = "你是高精度信息监控分类器。严格按关注意图判断帖子是否值得提醒。只输出 JSON 对象，字段为 matchScore、reason、evidence。matchScore 是帖子符合关注意图的程度：0 表示完全不符合，1 表示完全符合；它不是对真假结论的把握度。";
+function classificationBodies(ai, prompt, imageUrls, { schema = MATCH_SCHEMA, schemaName = "topic_match", maxOutputTokens = 500 } = {}) {
+  const systemInstruction = schemaName === "topic_match_batch"
+    ? "你是高精度信息监控分类器。一次判断多条帖子，严格按关注意图分别判断。只输出 JSON 对象，顶层字段为 results；results 每项必须包含输入中的 feedId、matchScore、reason、evidence，顺序与输入一致且不得遗漏。matchScore 是帖子符合关注意图的程度：0 表示完全不符合，1 表示完全符合。"
+    : "你是高精度信息监控分类器。严格按关注意图判断帖子是否值得提醒。只输出 JSON 对象，字段为 matchScore、reason、evidence。matchScore 是帖子符合关注意图的程度：0 表示完全不符合，1 表示完全符合；它不是对真假结论的把握度。";
   const responseContent = [
     { type: "input_text", text: prompt },
     ...imageUrls.map((imageUrl) => ({ type: "input_image", image_url: imageUrl, detail: "low" })),
@@ -709,16 +718,16 @@ function classificationBodies(ai, prompt, imageUrls) {
     responses: {
       model: ai.model,
       reasoning: { effort: settings.ai.reasoningEffort || "low" },
-      max_output_tokens: 500,
+      max_output_tokens: maxOutputTokens,
       input: [
         { role: "system", content: [{ type: "input_text", text: systemInstruction }] },
         { role: "user", content: responseContent },
       ],
-      text: { format: { type: "json_schema", name: "topic_match", strict: true, schema: MATCH_SCHEMA } },
+      text: { format: { type: "json_schema", name: schemaName, strict: true, schema } },
     },
     chat_completions: {
       model: ai.model,
-      max_tokens: 500,
+      max_tokens: maxOutputTokens,
       messages: [
         { role: "system", content: systemInstruction },
         { role: "user", content: chatContent },
@@ -727,14 +736,14 @@ function classificationBodies(ai, prompt, imageUrls) {
     },
     anthropic_messages: {
       model: ai.model,
-      max_tokens: 500,
+      max_tokens: maxOutputTokens,
       system: systemInstruction,
       messages: [{ role: "user", content: [...anthropicImages, { type: "text", text: prompt }] }],
     },
     gemini_generate_content: {
       systemInstruction: { parts: [{ text: systemInstruction }] },
       contents: [{ role: "user", parts: [{ text: prompt }, ...geminiImages] }],
-      generationConfig: { maxOutputTokens: 500, responseMimeType: "application/json", responseSchema: MATCH_SCHEMA },
+      generationConfig: { maxOutputTokens, responseMimeType: "application/json", responseSchema: schema },
     },
   };
 }
@@ -833,6 +842,45 @@ async function classifyFeed(topic, feed) {
   };
 }
 
+async function classifyFeedBatch(topic, feeds) {
+  if (feeds.length === 1) return new Map([[String(feeds[0].id), await classifyFeed(topic, feeds[0])]]);
+  const ai = resolvedAiSettings();
+  if (!settings.ai.enabled) throw new Error("AI 筛选总开关尚未开启");
+  if (!ai.apiKey) throw new Error("请先在系统设置中配置 AI API Key");
+  const intent = String(topic.ai?.intent || "").trim();
+  if (!topic.ai?.enabled || !intent) throw new Error("该话题尚未配置 AI 关注意图");
+  const items = feeds.map((feed) => ({
+    feedId: String(feed.id),
+    author: String(feed.username || "").slice(0, 100),
+    title: String(feed.title || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 500),
+    content: String(feed.message || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 4000),
+  }));
+  const prompt = [
+    `监控话题：${topic.tag}`,
+    `关注意图：${intent}`,
+    "请分别判断以下帖子。不要因为不同帖子出现相同词语而混淆；每个 feedId 必须返回一项。宁可减少误报，不要只因个别关键词就判定命中。",
+    JSON.stringify(items),
+  ].join("\n");
+  const result = await requestAi(ai, classificationBodies(ai, prompt, [], {
+    schema: BATCH_MATCH_SCHEMA,
+    schemaName: "topic_match_batch",
+    maxOutputTokens: Math.min(4_000, Math.max(800, feeds.length * 350)),
+  }), 60_000);
+  const output = extractAiText(result.payload, result.mode);
+  if (!output) throw new Error("AI 未返回可解析的批量判断结果");
+  const normalized = normalizeBatchMatchResults(parseAiJson(output), feeds.map((feed) => String(feed.id)));
+  const meta = {
+    model: ai.model,
+    provider: inferAiProvider(ai),
+    mode: result.mode,
+    imageFallback: Boolean(settings.ai.includeImages && feeds.some((feed) => feed.pictures?.length)),
+    compatibilityFallback: Boolean(result.compatibilityFallback),
+    batchSize: feeds.length,
+  };
+  for (const [feedId, value] of normalized) normalized.set(feedId, { ...value, ...meta });
+  return normalized;
+}
+
 async function postFeishu(body) {
   const feishu = resolvedFeishuSettings();
   if (!feishu.webhookUrl) throw new Error("请先配置飞书自定义机器人 Webhook");
@@ -879,7 +927,9 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
   const task = (async () => {
     const topic = state.topics.find((item) => item.tag === tag);
     if (!topic) throw new Error("未找到该监控话题");
-    if (!topic.ai?.enabled || !topic.ai?.intent?.trim()) throw new Error("请先配置并启用该话题的 AI 关注意图");
+    const keywords = normalizeKeywords(topic.ai?.keywords);
+    const aiEnabled = Boolean(settings.ai.enabled && topic.ai?.enabled && topic.ai.intent?.trim());
+    if (!keywords.length && !aiEnabled) throw new Error("请先配置关键词或启用该话题的 AI 关注意图");
     const processed = new Set(settings.processedFeedIds[tag] || []);
     const latestByFeed = new Map(latestEvaluations(archive.evaluations)
       .filter((item) => item.topic === tag)
@@ -892,19 +942,71 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
     });
     const results = [];
     runtime.lastAiError = null;
+    const classified = new Map();
+    const failures = new Map();
+    const aiCandidates = [];
+
     for (const feed of feeds) {
+      const keywordResult = matchFeedKeywords(feed, keywords);
+      if (keywordResult.matched) {
+        classified.set(String(feed.id), {
+          matchScore: 1,
+          reason: `关键词命中：${keywordResult.matchedKeywords.join("、")}`,
+          evidence: keywordResult.matchedKeywords.map((keyword) => `命中关键词“${keyword}”`).slice(0, 4),
+          model: "keyword-rule",
+          provider: "local",
+          mode: "keyword",
+          matchSource: "keyword",
+          batchSize: 1,
+        });
+      } else if (aiEnabled) {
+        aiCandidates.push(feed);
+      } else {
+        processed.add(String(feed.id));
+      }
+    }
+
+    const batchSize = Math.max(1, Math.min(20, Number(process.env.AI_BATCH_SIZE || settings.ai.batchSize) || 8));
+    for (const batch of chunkItems(aiCandidates, batchSize)) {
       try {
-        const raw = await classifyFeed(topic, feed);
+        const batchResults = await classifyFeedBatch(topic, batch);
+        for (const feed of batch) {
+          const feedId = String(feed.id);
+          if (batchResults.has(feedId)) classified.set(feedId, { ...batchResults.get(feedId), matchSource: "ai" });
+          else {
+            try {
+              classified.set(feedId, { ...await classifyFeed(topic, feed), matchSource: "ai", batchFallback: true, batchSize: 1 });
+            } catch (error) {
+              failures.set(feedId, error);
+            }
+          }
+        }
+      } catch (batchError) {
+        for (const feed of batch) {
+          try {
+            classified.set(String(feed.id), { ...await classifyFeed(topic, feed), matchSource: "ai", batchFallback: true, batchSize: 1 });
+          } catch (error) {
+            failures.set(String(feed.id), error?.message ? error : batchError);
+          }
+        }
+      }
+    }
+
+    for (const [feedIndex, feed] of feeds.entries()) {
+      const feedId = String(feed.id);
+      const raw = classified.get(feedId);
+      if (raw) {
         const threshold = effectiveTopicThreshold(topic);
+        const keywordMatched = raw.matchSource === "keyword";
         const evaluation = {
-          id: `${feed.id}-${Date.now()}`,
+          id: `${feed.id}-${Date.now()}-${feedIndex}`,
           topic: tag,
-          feedId: String(feed.id),
+          feedId,
           title: feed.title,
           username: feed.username,
           feedUrl: feed.url,
-          matched: raw.matchScore >= threshold,
-          matchedAtEvaluation: raw.matchScore >= threshold,
+          matched: keywordMatched || raw.matchScore >= threshold,
+          matchedAtEvaluation: keywordMatched || raw.matchScore >= threshold,
           matchScore: raw.matchScore,
           scoreVersion: 2,
           threshold,
@@ -914,6 +1016,10 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
           model: raw.model,
           provider: raw.provider,
           apiMode: raw.mode,
+          matchSource: raw.matchSource || "ai",
+          matchedKeywords: keywordMatched ? raw.evidence.map((item) => item.replace(/^命中关键词“|”$/g, "")) : [],
+          batchSize: Number(raw.batchSize || 1),
+          batchFallback: Boolean(raw.batchFallback),
           imageFallback: Boolean(raw.imageFallback),
           compatibilityFallback: Boolean(raw.compatibilityFallback),
           sourceKey: topic.sourceKey || "",
@@ -946,8 +1052,9 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
           feedId: feed.id,
         });
         results.push(evaluation);
-        if (!evaluation.notificationError) processed.add(String(feed.id));
-      } catch (error) {
+        if (!evaluation.notificationError) processed.add(feedId);
+      } else if (failures.has(feedId)) {
+        const error = failures.get(feedId);
         const previousError = latestByFeed.get(String(feed.id));
         const retryCount = previousError?.status === "error" ? Number(previousError.retryCount || 1) + 1 : 1;
         const retryMinutes = Math.min(60, 5 * (2 ** Math.min(4, retryCount - 1)));
@@ -991,13 +1098,12 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
         });
         results.push(evaluation);
       }
-      settings.processedFeedIds[tag] = [...processed].slice(-500);
-      archive.evaluations = archive.evaluations.slice(0, normalizeRetention(settings.retention).maxEvaluations);
-      await Promise.all([saveArchive(), saveSettings()]);
     }
+    settings.processedFeedIds[tag] = [...processed].slice(-500);
+    archive.evaluations = archive.evaluations.slice(0, normalizeRetention(settings.retention).maxEvaluations);
     topic.ai.lastAnalyzedAt = new Date().toISOString();
     runtime.lastAiRunAt = topic.ai.lastAnalyzedAt;
-    await Promise.all([saveState(), saveArchive()]);
+    await Promise.all([saveState(), saveArchive(), saveSettings()]);
     return results;
   })();
   analysisPromise = task;
@@ -1027,6 +1133,7 @@ async function loadState() {
       ai: {
         enabled: Boolean(topic.ai?.enabled),
         intent: String(topic.ai?.intent || ""),
+        keywords: normalizeKeywords(topic.ai?.keywords),
         threshold: topic.ai?.threshold == null ? null : clampThreshold(topic.ai.threshold),
         notify: topic.ai?.notify !== false,
         lastAnalyzedAt: topic.ai?.lastAnalyzedAt || null,
@@ -1180,7 +1287,7 @@ async function pollAll() {
         console.error(`刷新“${tag}”失败：`, error.message);
       }
       const topic = state.topics.find((item) => item.tag === tag);
-      if (settings.ai.enabled && topic?.ai?.enabled && topic.ai.intent?.trim()) {
+      if (topicHasRules(topic)) {
         const retryFeeds = latestEvaluations(archive.evaluations)
           .filter((item) => item.topic === tag && (item.status === "error" || item.notificationError))
           .filter((item) => !item.nextRetryAt || new Date(item.nextRetryAt).getTime() <= Date.now())
@@ -1312,6 +1419,7 @@ async function handleApi(request, response, url) {
       if (["none", "low", "medium", "high"].includes(next.reasoningEffort)) settings.ai.reasoningEffort = next.reasoningEffort;
       if (typeof next.includeImages === "boolean") settings.ai.includeImages = next.includeImages;
       if (next.threshold != null) settings.ai.threshold = clampThreshold(next.threshold);
+      if (next.batchSize != null) settings.ai.batchSize = Math.max(1, Math.min(20, Number(next.batchSize) || 8));
       if (typeof next.apiKey === "string" && next.apiKey.trim()) settings.ai.apiKey = next.apiKey.trim();
       if (next.clearApiKey === true) settings.ai.apiKey = "";
     }
@@ -1343,15 +1451,22 @@ async function handleApi(request, response, url) {
     const statusFilter = url.searchParams.get("status") || "all";
     const pageSize = Math.max(10, Math.min(500, Number(url.searchParams.get("pageSize") || url.searchParams.get("limit") || 200)));
     const requestedPage = Math.max(1, Number(url.searchParams.get("page") || 1));
-    const records = latestEvaluations(archive.evaluations)
+    const topicEvaluations = latestEvaluations(archive.evaluations)
       .map(currentEvaluation)
-      .filter((item) => !tag || item.topic === tag)
-      .filter((item) => statusFilter !== "matched" || item.matched);
+      .filter((item) => !tag || item.topic === tag);
+    const records = topicEvaluations.filter((item) => statusFilter !== "matched" || item.matched);
     const total = records.length;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(requestedPage, totalPages);
     const evaluations = records.slice((page - 1) * pageSize, page * pageSize);
-    return sendJson(response, 200, { evaluations, stats: evaluationSummary(archive.evaluations, topicsWithEffectiveThresholds()), total, page, pageSize, totalPages });
+    return sendJson(response, 200, {
+      evaluations,
+      stats: evaluationSummary(topicEvaluations, topicsWithEffectiveThresholds().filter((topic) => !tag || topic.tag === tag)),
+      total,
+      page,
+      pageSize,
+      totalPages,
+    });
   }
   if (request.method === "GET" && url.pathname === "/api/archive/summary") {
     return sendJson(response, 200, { archive: archiveSummary(archive), retention: normalizeRetention(settings.retention) });
@@ -1461,7 +1576,7 @@ async function handleApi(request, response, url) {
       tag: topicData.detail.tag || topicData.detail.title || cleanTag,
       ...topicData,
       fetch: normalizeTopicFetch(topicData.fetch),
-      ai: { enabled: false, intent: "", threshold: null, notify: true, lastAnalyzedAt: null },
+      ai: { enabled: false, intent: "", keywords: [], threshold: null, notify: true, lastAnalyzedAt: null },
       scanCursor: scanCursor || null,
       lastAttemptAt: now,
       lastFetchedAt: initialScanComplete ? now : null,
@@ -1508,20 +1623,23 @@ async function handleApi(request, response, url) {
     const body = await readJson(request);
     const ai = body.ai && typeof body.ai === "object" ? body.ai : {};
     const fetchConfig = body.fetch && typeof body.fetch === "object" ? body.fetch : {};
-    const wasEnabled = Boolean(topic.ai?.enabled);
+    const previousRuleSignature = JSON.stringify({
+      enabled: Boolean(topic.ai?.enabled),
+      intent: String(topic.ai?.intent || ""),
+      keywords: normalizeKeywords(topic.ai?.keywords),
+    });
     topic.ai = {
-      enabled: typeof ai.enabled === "boolean" ? ai.enabled : wasEnabled,
+      enabled: typeof ai.enabled === "boolean" ? ai.enabled : Boolean(topic.ai?.enabled),
       intent: typeof ai.intent === "string" ? ai.intent.trim().slice(0, 1200) : String(topic.ai?.intent || ""),
+      keywords: ai.keywords == null ? normalizeKeywords(topic.ai?.keywords) : normalizeKeywords(ai.keywords),
       threshold: ai.threshold == null || ai.threshold === "" ? null : clampThreshold(ai.threshold),
       notify: typeof ai.notify === "boolean" ? ai.notify : topic.ai?.notify !== false,
       lastAnalyzedAt: topic.ai?.lastAnalyzedAt || null,
     };
     topic.fetch = normalizeTopicFetch({ ...topic.fetch, ...fetchConfig });
     if (topic.ai.enabled && !topic.ai.intent) return sendJson(response, 400, { error: "启用 AI 筛选前请填写关注意图" });
-    if (!wasEnabled && topic.ai.enabled && !settings.processedFeedIds[tag]) {
-      settings.processedFeedIds[tag] = (topic.feeds || []).map((feed) => String(feed.id));
-      await saveSettings();
-    }
+    const nextRuleSignature = JSON.stringify({ enabled: topic.ai.enabled, intent: topic.ai.intent, keywords: topic.ai.keywords });
+    if (previousRuleSignature !== nextRuleSignature) settings.processedFeedIds[tag] = [];
     appendArchiveEvent(archive, {
       type: "monitor_updated",
       level: "info",
