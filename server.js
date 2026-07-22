@@ -1408,7 +1408,15 @@ async function proxyImage(url, response) {
     "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
     "X-Content-Type-Options": "nosniff",
   });
-  Readable.fromWeb(upstream.body).pipe(response);
+  const stream = Readable.fromWeb(upstream.body);
+  stream.on("error", (error) => {
+    console.warn(`图片代理流中断：${error.message}`);
+    if (!response.destroyed) response.destroy();
+  });
+  response.on("close", () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+  stream.pipe(response);
 }
 
 async function handleApi(request, response, url) {
