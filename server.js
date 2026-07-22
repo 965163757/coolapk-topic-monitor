@@ -8,7 +8,7 @@ import { BATCH_MATCH_SCHEMA, MATCH_SCHEMA, buildFeishuFeedNotification, clampThr
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
-import { chunkItems, matchFeedKeywords, normalizeKeywords } from "./lib/rules.js";
+import { chunkItems, matchFeedKeywords, normalizeKeywords, requiresNotification } from "./lib/rules.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -947,6 +947,21 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
     const aiCandidates = [];
 
     for (const feed of feeds) {
+      const previous = latestByFeed.get(String(feed.id));
+      if (!force && requiresNotification(previous, topic, settings.feishu.enabled)) {
+        classified.set(String(feed.id), {
+          matchScore: Number(previous.matchScore ?? previous.confidence ?? 1),
+          reason: previous.reason,
+          evidence: previous.evidence || [],
+          model: previous.model,
+          provider: previous.provider,
+          mode: previous.apiMode,
+          matchSource: previous.matchSource || "ai",
+          batchSize: Number(previous.batchSize || 1),
+          notificationRetry: true,
+        });
+        continue;
+      }
       const keywordResult = matchFeedKeywords(feed, keywords);
       if (keywordResult.matched) {
         classified.set(String(feed.id), {
@@ -1020,6 +1035,7 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
           matchedKeywords: keywordMatched ? raw.evidence.map((item) => item.replace(/^命中关键词“|”$/g, "")) : [],
           batchSize: Number(raw.batchSize || 1),
           batchFallback: Boolean(raw.batchFallback),
+          notificationRetry: Boolean(raw.notificationRetry),
           imageFallback: Boolean(raw.imageFallback),
           compatibilityFallback: Boolean(raw.compatibilityFallback),
           sourceKey: topic.sourceKey || "",
@@ -1052,7 +1068,8 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
           feedId: feed.id,
         });
         results.push(evaluation);
-        if (!evaluation.notificationError) processed.add(feedId);
+        if (!evaluation.notificationError && !requiresNotification(evaluation, topic, settings.feishu.enabled)) processed.add(feedId);
+        else processed.delete(feedId);
       } else if (failures.has(feedId)) {
         const error = failures.get(feedId);
         const previousError = latestByFeed.get(String(feed.id));
@@ -1097,6 +1114,7 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
           feedId: feed.id,
         });
         results.push(evaluation);
+        processed.delete(feedId);
       }
     }
     settings.processedFeedIds[tag] = [...processed].slice(-500);
@@ -1186,7 +1204,12 @@ async function loadArchive() {
       scoreSemantics: "legacy_decision_confidence",
     };
   });
-  for (const item of latestEvaluations(archive.evaluations).filter((evaluation) => evaluation.status === "error" || evaluation.notificationError)) {
+  const topicsByNotificationTag = new Map(state.topics.map((topic) => [topic.tag, topic]));
+  for (const item of latestEvaluations(archive.evaluations).filter((evaluation) => (
+    evaluation.status === "error"
+    || evaluation.notificationError
+    || requiresNotification(evaluation, topicsByNotificationTag.get(evaluation.topic), settings.feishu.enabled)
+  ))) {
     const processed = new Set(settings.processedFeedIds[item.topic] || []);
     if (processed.delete(String(item.feedId))) settings.processedFeedIds[item.topic] = [...processed];
   }
@@ -1289,7 +1312,11 @@ async function pollAll() {
       const topic = state.topics.find((item) => item.tag === tag);
       if (topicHasRules(topic)) {
         const retryFeeds = latestEvaluations(archive.evaluations)
-          .filter((item) => item.topic === tag && (item.status === "error" || item.notificationError))
+          .filter((item) => item.topic === tag && (
+            item.status === "error"
+            || item.notificationError
+            || requiresNotification(item, topic, settings.feishu.enabled)
+          ))
           .filter((item) => !item.nextRetryAt || new Date(item.nextRetryAt).getTime() <= Date.now())
           .map((item) => archive.feeds[String(item.feedId)])
           .filter(Boolean);
@@ -1404,6 +1431,7 @@ async function handleApi(request, response, url) {
   }
   if (request.method === "PUT" && url.pathname === "/api/settings") {
     const body = await readJson(request);
+    const wasFeishuEnabled = Boolean(settings.feishu.enabled);
     if (body.ai && typeof body.ai === "object") {
       const next = body.ai;
       if (typeof next.enabled === "boolean") settings.ai.enabled = next.enabled;
@@ -1433,6 +1461,15 @@ async function handleApi(request, response, url) {
       if (typeof next.secret === "string" && next.secret.trim()) settings.feishu.secret = next.secret.trim();
       if (next.clearWebhook === true) settings.feishu.webhookUrl = "";
       if (next.clearSecret === true) settings.feishu.secret = "";
+    }
+    if (!wasFeishuEnabled && settings.feishu.enabled) {
+      const topicMap = new Map(state.topics.map((topic) => [topic.tag, topic]));
+      for (const item of latestEvaluations(archive.evaluations)) {
+        if (!requiresNotification(item, topicMap.get(item.topic), true)) continue;
+        const processed = new Set(settings.processedFeedIds[item.topic] || []);
+        processed.delete(String(item.feedId));
+        settings.processedFeedIds[item.topic] = [...processed];
+      }
     }
     if (body.retention && typeof body.retention === "object") settings.retention = normalizeRetention({ ...settings.retention, ...body.retention });
     appendArchiveEvent(archive, { type: "settings_updated", level: "info", message: "系统集成与数据留存设置已更新" });
@@ -1627,6 +1664,7 @@ async function handleApi(request, response, url) {
       enabled: Boolean(topic.ai?.enabled),
       intent: String(topic.ai?.intent || ""),
       keywords: normalizeKeywords(topic.ai?.keywords),
+      notify: topic.ai?.notify !== false,
     });
     topic.ai = {
       enabled: typeof ai.enabled === "boolean" ? ai.enabled : Boolean(topic.ai?.enabled),
@@ -1638,7 +1676,7 @@ async function handleApi(request, response, url) {
     };
     topic.fetch = normalizeTopicFetch({ ...topic.fetch, ...fetchConfig });
     if (topic.ai.enabled && !topic.ai.intent) return sendJson(response, 400, { error: "启用 AI 筛选前请填写关注意图" });
-    const nextRuleSignature = JSON.stringify({ enabled: topic.ai.enabled, intent: topic.ai.intent, keywords: topic.ai.keywords });
+    const nextRuleSignature = JSON.stringify({ enabled: topic.ai.enabled, intent: topic.ai.intent, keywords: topic.ai.keywords, notify: topic.ai.notify });
     if (previousRuleSignature !== nextRuleSignature) settings.processedFeedIds[tag] = [];
     appendArchiveEvent(archive, {
       type: "monitor_updated",
