@@ -1712,7 +1712,7 @@ async function handleApi(request, response, url) {
       topic: topic.tag,
       sourceKey: topic.sourceKey,
     });
-    await Promise.all([saveState(), saveArchive()]);
+    await Promise.all([saveState(), saveSettings(), saveArchive()]);
     return sendJson(response, 200, { topic: publicTopicSnapshot(topic) });
   }
   if (topicMatch && request.method === "DELETE") {
