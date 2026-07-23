@@ -8,7 +8,7 @@ import { BATCH_MATCH_SCHEMA, MATCH_SCHEMA, buildFeishuFeedNotification, clampThr
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
-import { chunkItems, matchFeedKeywords, normalizeKeywords, requiresNotification } from "./lib/rules.js";
+import { aiRuleInstructions, chunkItems, matchFeedKeywords, normalizeKeywords, normalizeRuleMode, requiresNotification } from "./lib/rules.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -569,7 +569,10 @@ function effectiveTopicThreshold(topic) {
 }
 
 function topicHasRules(topic) {
-  return normalizeKeywords(topic?.ai?.keywords).length > 0 || Boolean(settings.ai.enabled && topic?.ai?.enabled && topic.ai.intent?.trim());
+  const mode = normalizeRuleMode(topic?.ai?.mode, topic?.ai);
+  return mode === "keyword"
+    ? normalizeKeywords(topic?.ai?.keywords).length > 0
+    : Boolean(settings.ai.enabled && topic?.ai?.enabled && topic.ai.intent?.trim());
 }
 
 function topicsWithEffectiveThresholds() {
@@ -800,14 +803,15 @@ async function classifyFeed(topic, feed) {
   if (!ai.apiKey) throw new Error("请先在系统设置中配置 AI API Key");
   const intent = String(topic.ai?.intent || "").trim();
   if (!topic.ai?.enabled || !intent) throw new Error("该话题尚未配置 AI 关注意图");
+  const ruleInstructions = aiRuleInstructions(topic.ai);
 
   const prompt = [
     `监控话题：${topic.tag}`,
-    `关注意图：${intent}`,
+    ruleInstructions,
     `帖子作者：${feed.username}`,
     `帖子标题：${feed.title}`,
     `帖子正文：${String(feed.message || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 8000)}`,
-    "请判断这条帖子是否真正符合关注意图。宁可减少误报，不要只因为出现个别关键词就判定命中。价格、商品、活动条件等关键信息若只在图片中，也要结合图片判断。",
+    "请判断这条帖子是否真正符合需要关注的条件，并逐项检查明确排除规则。宁可减少误报，不要只因为出现个别关键词就判定命中。价格、商品、活动条件等关键信息若只在图片中，也要结合图片判断。",
     "请用 matchScore 表示匹配程度；是否达到通知条件由系统阈值统一决定。",
   ].join("\n");
 
@@ -849,6 +853,7 @@ async function classifyFeedBatch(topic, feeds) {
   if (!ai.apiKey) throw new Error("请先在系统设置中配置 AI API Key");
   const intent = String(topic.ai?.intent || "").trim();
   if (!topic.ai?.enabled || !intent) throw new Error("该话题尚未配置 AI 关注意图");
+  const ruleInstructions = aiRuleInstructions(topic.ai);
   const items = feeds.map((feed) => ({
     feedId: String(feed.id),
     author: String(feed.username || "").slice(0, 100),
@@ -857,8 +862,8 @@ async function classifyFeedBatch(topic, feeds) {
   }));
   const prompt = [
     `监控话题：${topic.tag}`,
-    `关注意图：${intent}`,
-    "请分别判断以下帖子。不要因为不同帖子出现相同词语而混淆；每个 feedId 必须返回一项。宁可减少误报，不要只因个别关键词就判定命中。",
+    ruleInstructions,
+    "请分别判断以下帖子，并对每条内容逐项检查明确排除规则。不要因为不同帖子出现相同词语而混淆；每个 feedId 必须返回一项。宁可减少误报，不要只因个别关键词就判定命中。",
     JSON.stringify(items),
   ].join("\n");
   const result = await requestAi(ai, classificationBodies(ai, prompt, [], {
@@ -927,9 +932,11 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
   const task = (async () => {
     const topic = state.topics.find((item) => item.tag === tag);
     if (!topic) throw new Error("未找到该监控话题");
-    const keywords = normalizeKeywords(topic.ai?.keywords);
-    const aiEnabled = Boolean(settings.ai.enabled && topic.ai?.enabled && topic.ai.intent?.trim());
-    if (!keywords.length && !aiEnabled) throw new Error("请先配置关键词或启用该话题的 AI 关注意图");
+    const ruleMode = normalizeRuleMode(topic.ai?.mode, topic.ai);
+    const keywords = ruleMode === "keyword" ? normalizeKeywords(topic.ai?.keywords) : [];
+    const aiEnabled = Boolean(ruleMode === "ai" && settings.ai.enabled && topic.ai?.enabled && topic.ai.intent?.trim());
+    if (ruleMode === "keyword" && !keywords.length) throw new Error("关键词判断模式至少需要一个关键词");
+    if (ruleMode === "ai" && !aiEnabled) throw new Error("请先启用全局 AI，并填写当前话题的需要关注规则");
     const processed = new Set(settings.processedFeedIds[tag] || []);
     const latestByFeed = new Map(latestEvaluations(archive.evaluations)
       .filter((item) => item.topic === tag)
@@ -1152,8 +1159,10 @@ async function loadState() {
       sourceKey: topic.sourceKey || source.key,
       fetch: normalizeTopicFetch(topic.fetch),
       ai: {
+        mode: normalizeRuleMode(topic.ai?.mode, topic.ai),
         enabled: Boolean(topic.ai?.enabled),
         intent: String(topic.ai?.intent || ""),
+        exclude: String(topic.ai?.exclude || ""),
         keywords: normalizeKeywords(topic.ai?.keywords),
         threshold: topic.ai?.threshold == null ? null : clampThreshold(topic.ai.threshold),
         notify: topic.ai?.notify !== false,
@@ -1624,7 +1633,7 @@ async function handleApi(request, response, url) {
       tag: topicData.detail.tag || topicData.detail.title || cleanTag,
       ...topicData,
       fetch: normalizeTopicFetch(topicData.fetch),
-      ai: { enabled: false, intent: "", keywords: [], threshold: null, notify: true, lastAnalyzedAt: null },
+      ai: { mode: "ai", enabled: true, intent: "", exclude: "", keywords: [], threshold: null, notify: true, lastAnalyzedAt: null },
       scanCursor: scanCursor || null,
       lastAttemptAt: now,
       lastFetchedAt: initialScanComplete ? now : null,
@@ -1672,22 +1681,29 @@ async function handleApi(request, response, url) {
     const ai = body.ai && typeof body.ai === "object" ? body.ai : {};
     const fetchConfig = body.fetch && typeof body.fetch === "object" ? body.fetch : {};
     const previousRuleSignature = JSON.stringify({
+      mode: normalizeRuleMode(topic.ai?.mode, topic.ai),
       enabled: Boolean(topic.ai?.enabled),
       intent: String(topic.ai?.intent || ""),
+      exclude: String(topic.ai?.exclude || ""),
       keywords: normalizeKeywords(topic.ai?.keywords),
       notify: topic.ai?.notify !== false,
     });
-    topic.ai = {
-      enabled: typeof ai.enabled === "boolean" ? ai.enabled : Boolean(topic.ai?.enabled),
+    const nextMode = normalizeRuleMode(ai.mode ?? topic.ai?.mode, { ...topic.ai, ...ai });
+    const nextAi = {
+      mode: nextMode,
+      enabled: nextMode === "ai",
       intent: typeof ai.intent === "string" ? ai.intent.trim().slice(0, 1200) : String(topic.ai?.intent || ""),
+      exclude: typeof ai.exclude === "string" ? ai.exclude.trim().slice(0, 2400) : String(topic.ai?.exclude || ""),
       keywords: ai.keywords == null ? normalizeKeywords(topic.ai?.keywords) : normalizeKeywords(ai.keywords),
       threshold: ai.threshold == null || ai.threshold === "" ? null : clampThreshold(ai.threshold),
       notify: typeof ai.notify === "boolean" ? ai.notify : topic.ai?.notify !== false,
       lastAnalyzedAt: topic.ai?.lastAnalyzedAt || null,
     };
+    if (nextMode === "ai" && !nextAi.intent) return sendJson(response, 400, { error: "AI 判断模式需要填写“需要关注”规则" });
+    if (nextMode === "keyword" && !nextAi.keywords.length) return sendJson(response, 400, { error: "关键词判断模式至少需要一个关键词" });
+    topic.ai = nextAi;
     topic.fetch = normalizeTopicFetch({ ...topic.fetch, ...fetchConfig });
-    if (topic.ai.enabled && !topic.ai.intent) return sendJson(response, 400, { error: "启用 AI 筛选前请填写关注意图" });
-    const nextRuleSignature = JSON.stringify({ enabled: topic.ai.enabled, intent: topic.ai.intent, keywords: topic.ai.keywords, notify: topic.ai.notify });
+    const nextRuleSignature = JSON.stringify({ mode: topic.ai.mode, enabled: topic.ai.enabled, intent: topic.ai.intent, exclude: topic.ai.exclude, keywords: topic.ai.keywords, notify: topic.ai.notify });
     if (previousRuleSignature !== nextRuleSignature) settings.processedFeedIds[tag] = [];
     appendArchiveEvent(archive, {
       type: "monitor_updated",

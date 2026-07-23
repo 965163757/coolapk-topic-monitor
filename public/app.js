@@ -270,10 +270,11 @@ function renderFeed() {
       <div class="feed-header-actions"><button class="ai-rule-button active" type="button" data-open-search><i class="ph ph-plus"></i><span>添加监控</span></button></div>`;
   } else {
     const detail = topic.detail || { title: topic.tag };
-    const keywordCount = topic.ai?.keywords?.length || 0;
-    const aiActive = (topic.ai?.enabled && topic.ai?.intent) || keywordCount;
+    const ruleMode = topic.ai?.mode || (topic.ai?.enabled && topic.ai?.intent ? "ai" : "keyword");
+    const keywordCount = ruleMode === "keyword" ? topic.ai?.keywords?.length || 0 : 0;
+    const aiActive = ruleMode === "ai" ? Boolean(topic.ai?.enabled && topic.ai?.intent) : keywordCount > 0;
     feedHeader.innerHTML = `
-      <div class="feed-heading"><span class="feed-eyebrow">ACTIVE WATCH</span><h1>${escapeHtml(detail.title || topic.tag)} <span class="live-label">监控中</span></h1><p>已归档 ${numberFormat.format(topic.archiveCount ?? dashboardFeedMeta.total ?? 0)} 条 · 本轮缓存 ${numberFormat.format(topic.currentFeedCount ?? topic.feeds?.length ?? 0)} 条 · 默认${fetchSortLabel(topic.fetch?.sort)}${keywordCount ? ` · ${keywordCount} 个关键词` : ""}${topic.ai?.enabled ? " · AI 筛选已开启" : ""}</p></div>
+      <div class="feed-heading"><span class="feed-eyebrow">ACTIVE WATCH</span><h1>${escapeHtml(detail.title || topic.tag)} <span class="live-label">监控中</span></h1><p>已归档 ${numberFormat.format(topic.archiveCount ?? dashboardFeedMeta.total ?? 0)} 条 · 本轮缓存 ${numberFormat.format(topic.currentFeedCount ?? topic.feeds?.length ?? 0)} 条 · 默认${fetchSortLabel(topic.fetch?.sort)}${keywordCount ? ` · ${keywordCount} 个关键词` : ""}${ruleMode === "ai" && topic.ai?.enabled ? " · AI 判断模式" : keywordCount ? " · 关键词判断模式" : ""}</p></div>
       <div class="feed-header-actions">
         <button class="ai-rule-button ${aiActive ? "active" : ""}" type="button" id="openRule"><i class="ph ph-sparkle"></i><span>${aiActive ? "监控规则" : "配置规则"}</span></button>
         <button type="button" id="removeTopic" title="停止监控" aria-label="停止监控"><i class="ph ph-trash"></i><span>停止监控</span></button>
@@ -612,12 +613,28 @@ async function showSettings() {
   try { await loadSettings(); } catch (error) { toast(error.message, "error"); }
 }
 
+function selectedRuleMode() {
+  return $('input[name="ruleMode"]:checked')?.value === "keyword" ? "keyword" : "ai";
+}
+
+function syncRuleMode() {
+  const mode = selectedRuleMode();
+  $("#keywordRulePanel").hidden = mode !== "keyword";
+  $("#aiRulePanel").hidden = mode !== "ai";
+  $("#ruleThresholdField").hidden = mode !== "ai";
+  const topic = activeTopic();
+  if ($("#analyzeCurrent span")) $("#analyzeCurrent span").textContent = `${mode === "keyword" ? "匹配" : "AI 分析"}当前 ${topic?.feeds?.length || 0} 条`;
+}
+
 function showRuleDialog() {
   const topic = activeTopic();
   if (!topic) return toast("请先添加一个监控话题", "error");
   $("#ruleTopicName").textContent = `#${topic.tag} · 定义真正值得提醒的内容`;
-  $("#ruleEnabled").checked = Boolean(topic.ai?.enabled);
+  const mode = topic.ai?.mode || (topic.ai?.enabled && topic.ai?.intent ? "ai" : topic.ai?.keywords?.length ? "keyword" : "ai");
+  $("#ruleModeKeyword").checked = mode === "keyword";
+  $("#ruleModeAi").checked = mode === "ai";
   $("#ruleIntent").value = topic.ai?.intent || "";
+  $("#ruleExclude").value = topic.ai?.exclude || "";
   $("#ruleKeywords").value = (topic.ai?.keywords || []).join("\n");
   $("#ruleThreshold").value = topic.ai?.threshold == null ? "" : Math.round(topic.ai.threshold * 100);
   const effectiveThreshold = topic.ai?.effectiveThreshold ?? settingsSnapshot?.ai?.threshold ?? 0.72;
@@ -627,18 +644,21 @@ function showRuleDialog() {
   $("#ruleNotify").checked = topic.ai?.notify !== false;
   $("#fetchSort").value = topic.fetch?.sort || "dateline_desc";
   $("#fetchLimit").value = topic.fetch?.limit || 20;
-  $("#analyzeCurrent span").textContent = `分析当前 ${topic.feeds?.length || 0} 条`;
   $("#ruleSaveStatus").textContent = "";
+  syncRuleMode();
   showDialog(ruleDialog);
 }
 
 async function saveRule() {
   const topic = activeTopic();
   if (!topic) return false;
+  const mode = selectedRuleMode();
   const payload = {
     ai: {
-      enabled: $("#ruleEnabled").checked,
+      mode,
+      enabled: mode === "ai",
       intent: $("#ruleIntent").value.trim(),
+      exclude: $("#ruleExclude").value.trim(),
       keywords: $("#ruleKeywords").value,
       threshold: $("#ruleThreshold").value === "" ? "" : Number($("#ruleThreshold").value) / 100,
       notify: $("#ruleNotify").checked,
@@ -921,6 +941,7 @@ searchResults.addEventListener("click", (event) => {
 
 $("#settingsForm").addEventListener("submit", async (event) => { event.preventDefault(); await saveSettingsForm(); });
 $("#ruleForm").addEventListener("submit", async (event) => { event.preventDefault(); if (await saveRule()) setTimeout(() => closeDialog(ruleDialog), 350); });
+$$('input[name="ruleMode"]').forEach((input) => input.addEventListener("change", syncRuleMode));
 
 $("#testAi").addEventListener("click", async () => {
   const button = $("#testAi");
@@ -983,18 +1004,19 @@ $("#analyzeCurrent").addEventListener("click", async () => {
   const topic = activeTopic();
   const button = $("#analyzeCurrent");
   if (!topic || !(await saveRule())) return;
+  const mode = selectedRuleMode();
   button.disabled = true;
-  button.innerHTML = '<i class="ph ph-circle-notch"></i> AI 分析中';
-  $("#ruleSaveStatus").textContent = "正在批量判断当前内容…";
+  button.innerHTML = `<i class="ph ph-circle-notch"></i> ${mode === "keyword" ? "关键词匹配中" : "AI 分析中"}`;
+  $("#ruleSaveStatus").textContent = mode === "keyword" ? "正在匹配当前内容…" : "正在批量判断当前内容…";
   try {
     const result = await api(`/api/topics/${encodeURIComponent(topic.tag)}/analyze`, { method: "POST", body: JSON.stringify({ force: true, notify: false }) });
     const keys = new Set(result.evaluations.map((item) => `${item.topic}\u0000${item.feedId}`));
     evaluations = [...result.evaluations, ...evaluations.filter((item) => !keys.has(`${item.topic}\u0000${item.feedId}`))];
     $("#ruleSaveStatus").textContent = `已完成 ${result.count} 条判断`;
     await loadDashboard();
-    toast(`AI 已完成 ${result.count} 条判断`);
+    toast(`${mode === "keyword" ? "关键词" : "AI"}已完成 ${result.count} 条判断`);
   } catch (error) { $("#ruleSaveStatus").textContent = error.message; toast(error.message, "error"); }
-  finally { button.disabled = false; button.innerHTML = `<i class="ph ph-play"></i><span>分析当前 ${activeTopic()?.feeds?.length || 0} 条</span>`; }
+  finally { button.disabled = false; button.innerHTML = `<i class="ph ph-play"></i><span>${mode === "keyword" ? "匹配" : "AI 分析"}当前 ${activeTopic()?.feeds?.length || 0} 条</span>`; }
 });
 
 $$('[data-history-filter]').forEach((button) => button.addEventListener("click", () => {

@@ -228,10 +228,17 @@
         <button type="button" data-close-dialog="ruleDialog" aria-label="关闭 AI 规则"><i class="ph ph-x"></i></button>
       </header>
       <form id="ruleForm" class="rule-form">
-        <label class="rule-toggle"><span><strong>启用当前话题的 AI 筛选</strong><small>未被关键词直接命中的帖子，将按批次进入 AI 语义判断。</small></span><span class="switch"><input id="ruleEnabled" type="checkbox" /><span></span></span></label>
-        <label class="field"><span>命中即推送的关键词</span><textarea id="ruleKeywords" rows="3" maxlength="2000" placeholder="例如：Bug价、免费、0元；支持逗号或换行分隔"></textarea><small class="field-help">标题或正文命中任意关键词即视为符合规则，无需等待 AI；每个话题独立配置。</small></label>
-        <label class="field"><span>你真正想关注什么？</span><textarea id="ruleIntent" rows="6" maxlength="1200" placeholder="例如：只关注价格明显低于市场价的数码商品，尤其是电商平台临时 Bug 价、叠券异常价；排除求购、回收、广告和普通优惠。"></textarea><small class="field-help">写清商品、价格条件和排除项可显著降低误报。</small></label>
-        <div class="form-grid compact"><label class="field"><span>默认展示排序</span><select id="fetchSort"><option value="dateline_desc">最新发布</option><option value="lastupdate_desc">最近回复</option><option value="popular">互动热度</option></select><small>采集始终按发布时间增量进行，此项只控制默认查看顺序。</small></label><label class="field"><span>每轮采集上限</span><input id="fetchLimit" type="number" min="10" max="100" step="10" /><small>系统会向后翻页，直到遇到上次采集游标或达到上限。</small></label><label class="field"><span>话题匹配阈值（%）</span><input id="ruleThreshold" type="number" min="10" max="100" step="1" placeholder="继承全局阈值" /><small id="ruleThresholdHint">留空时继承系统默认阈值。</small></label><label class="check-field"><input id="ruleNotify" type="checkbox" /><span>命中后发送飞书通知</span></label></div>
+        <div class="rule-form-scroll">
+          <fieldset class="rule-mode-picker"><legend>选择判断方式（二选一）</legend><label><input id="ruleModeKeyword" type="radio" name="ruleMode" value="keyword" /><span><i class="ph ph-key"></i><strong>关键词判断</strong><small>命中任意关键词就推送，不调用 AI</small></span></label><label><input id="ruleModeAi" type="radio" name="ruleMode" value="ai" /><span><i class="ph ph-sparkle"></i><strong>AI 判断</strong><small>理解需要与排除条件，批量语义识别</small></span></label></fieldset>
+          <section class="rule-mode-panel" id="keywordRulePanel">
+            <label class="field"><span>命中即推送的关键词</span><textarea id="ruleKeywords" rows="4" maxlength="2000" placeholder="例如：Bug价、免费、0元；支持逗号或换行分隔"></textarea><small class="field-help">标题或正文命中任意关键词即视为符合规则。关键词模式不会再执行 AI 判断。</small></label>
+          </section>
+          <section class="rule-mode-panel" id="aiRulePanel">
+            <label class="field"><span>需要关注</span><textarea id="ruleIntent" rows="5" maxlength="1200" placeholder="例如：Bug 级别的异常价格，或者价值 30 元以上的完全免费物品。"></textarea><small class="field-help">填写真正需要命中的商品、价格和活动条件。</small></label>
+            <label class="field exclude-field"><span>明确排除 / 不关注</span><textarea id="ruleExclude" rows="6" maxlength="2400" placeholder="例如：疑似暗广、纯记录、拉人头短链、询问、小额优惠券、信息隐晦不明。"></textarea><small class="field-help">排除项优先级最高；符合任意一项时，AI 会压低匹配分并阻止通知。</small></label>
+          </section>
+          <div class="form-grid compact"><label class="field"><span>默认展示排序</span><select id="fetchSort"><option value="dateline_desc">最新发布</option><option value="lastupdate_desc">最近回复</option><option value="popular">互动热度</option></select><small>采集始终按发布时间增量进行，此项只控制默认查看顺序。</small></label><label class="field"><span>每轮采集上限</span><input id="fetchLimit" type="number" min="10" max="100" step="10" /><small>系统会向后翻页，直到遇到上次采集游标或达到上限。</small></label><label class="field" id="ruleThresholdField"><span>话题匹配阈值（%）</span><input id="ruleThreshold" type="number" min="10" max="100" step="1" placeholder="继承全局阈值" /><small id="ruleThresholdHint">留空时继承系统默认阈值。</small></label><label class="check-field"><input id="ruleNotify" type="checkbox" /><span>命中后发送飞书通知</span></label></div>
+        </div>
         <footer class="panel-dialog-actions"><span id="ruleSaveStatus"></span><button class="secondary-button" id="analyzeCurrent" type="button"><i class="ph ph-play"></i><span>分析当前数据</span></button><button class="primary-button" type="submit"><i class="ph ph-check"></i>保存规则</button></footer>
       </form>
     </dialog>
