@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildFeishuFeedNotification, clampThreshold, extractChatCompletionText, extractResponseText, feishuSignature, maskSecret, normalizeBatchMatchResults, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
+import { buildFeishuFeedNotification, clampThreshold, extractChatCompletionText, extractResponseText, feishuNotificationTitle, feishuSignature, maskSecret, normalizeBatchMatchResults, normalizeMatchResult, validateFeishuWebhook } from "../lib/integrations.js";
 import { isUnsupportedImageInputError } from "../lib/ai-compat.js";
 
 test("extractResponseText supports raw Responses API output", () => {
@@ -65,6 +65,19 @@ test("builds Feishu notifications with content, pictures and reason only", () =>
   assert.equal(payload.card.elements[4].text.content, "**判断原因**\n价格明显低于正常水平");
   const serialized = JSON.stringify(payload);
   for (const hidden of ["author", "MODEL", "0.99", "0.72", "关注意图", "匹配度", "阈值"]) assert.equal(serialized.includes(hidden), false);
+});
+
+test("replaces synthetic username feed titles with the post content", () => {
+  const feed = {
+    id: "24680",
+    username: "测试用户",
+    title: "测试用户的动态",
+    message: "#薅羊毛小分队# 京东出现 Bug 价格，商品现在完全免费 查看链接",
+  };
+  assert.equal(feishuNotificationTitle(feed), "京东出现 Bug 价格，商品现在完全免费");
+  const payload = buildFeishuFeedNotification(feed, { reason: "符合条件" });
+  assert.equal(payload.card.header.title.content, "京东出现 Bug 价格，商品现在完全免费");
+  assert.equal(payload.card.header.title.content.includes("测试用户"), false);
 });
 
 test("builds a fallback Coolapk app link from the feed id", () => {
