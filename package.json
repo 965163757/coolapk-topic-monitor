@@ -1,8 +1,8 @@
 {
-  "name": "coolapk-topic-monitor",
-  "version": "1.0.0",
+  "name": "coolapk-web-workbench",
+  "version": "2.0.0",
   "private": true,
-  "description": "酷安话题动态监控面板",
+  "description": "响应式酷安 Web 客户端与 AI 话题监控工作台",
   "type": "module",
   "scripts": {
     "start": "node server.js",

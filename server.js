@@ -9,6 +9,7 @@ import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monito
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
 import { aiRuleInstructions, chunkItems, matchFeedKeywords, normalizeKeywords, normalizeRuleMode, requiresNotification } from "./lib/rules.js";
+import { appSummary, collectEntities, pageDecorations, uniqueSummaries, webChannelConfig, webChannels } from "./lib/web-client.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -196,6 +197,113 @@ function feedItems(data) {
   };
   visit(data);
   return [...new Map(result.map((item) => [String(item.id), item])).values()];
+}
+
+function appItems(data) {
+  return collectEntities(data, (item) => item?.entityType === "apk" || (item?.apkname && item?.id));
+}
+
+function publicTopicItems(data) {
+  return collectEntities(data, (item) => isSupportedSource(item))
+    .map(topicSummary)
+    .filter((item) => item.sourceKey);
+}
+
+async function fetchWebChannel(channel = "home", page = 1) {
+  const config = webChannelConfig(channel);
+  if (!config) throw new Error("不支持该内容频道");
+  const payload = await coolapkGet(config.path, { ...config.params, page });
+  const raw = payload.data || [];
+  const feeds = sortFeeds(feedItems(raw).map(feedSummary), channel === "home" ? "popular" : "dateline_desc");
+  const apps = uniqueSummaries(appItems(raw).map(appSummary));
+  const topics = uniqueSummaries(publicTopicItems(raw), "sourceKey");
+  const decorations = pageDecorations(raw);
+  const now = new Date().toISOString();
+  feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `channel:${config.key}`, topic: config.title, now }));
+  if (feeds.length) await saveArchive();
+  return {
+    channel: { key: config.key, title: config.title, description: config.description },
+    page,
+    feeds,
+    apps,
+    topics,
+    ...decorations,
+  };
+}
+
+async function fetchAppDetail(id, page = 1) {
+  const cleanId = String(id || "").trim();
+  if (!/^\d{1,20}$/.test(cleanId)) throw new Error("请输入有效的应用 ID");
+  const [detailPayload, feedPayload] = await Promise.all([
+    coolapkGet("/apk/detail", { id: cleanId, installed: 0 }),
+    coolapkGet("/page/dataList", {
+      url: "#/feed/apkCommentList",
+      isIncludeTop: 1,
+      id: cleanId,
+      page,
+      sort: "lastupdate_desc",
+    }).catch(() => ({ data: [] })),
+  ]);
+  const raw = detailPayload.data || {};
+  const feeds = feedItems(feedPayload.data).map(feedSummary);
+  const screenshotValues = [
+    ...(Array.isArray(raw.screenList) ? raw.screenList : []),
+    ...(Array.isArray(raw.screenshot) ? raw.screenshot : []),
+    ...(Array.isArray(raw.thumbList) ? raw.thumbList : []),
+  ];
+  const screenshots = screenshotValues
+    .map((item) => typeof item === "string" ? item : item?.url || item?.pic || item?.src || "")
+    .filter(Boolean);
+  return {
+    app: {
+      ...appSummary(raw),
+      subtitle: String(raw.subtitle || raw.description || ""),
+      description: String(raw.introduce || raw.description || raw.apkdescription || ""),
+      changelog: String(raw.changelog || raw.changeLog || ""),
+      permissions: Array.isArray(raw.permissionList) ? raw.permissionList.map(String).slice(0, 50) : [],
+      screenshots: [...new Set(screenshots)].slice(0, 12),
+    },
+    feeds,
+    page,
+  };
+}
+
+async function searchApps(keyword, page = 1) {
+  const q = String(keyword || "").trim();
+  if (!q) return [];
+  const remote = await coolapkGet("/search", {
+    type: "app",
+    searchValue: q,
+    page,
+    showAnonymous: -1,
+  }).then((payload) => appItems(payload.data).map(appSummary)).catch(() => []);
+  if (remote.length) return uniqueSummaries(remote);
+  const pages = await Promise.all([1, 2, 3].map((index) => coolapkGet("/apk/index", { page: index }).catch(() => ({ data: [] }))));
+  const normalized = pages.flatMap((payload) => appItems(payload.data).map(appSummary));
+  const lower = q.toLowerCase();
+  return uniqueSummaries(normalized.filter((app) => [
+    app.title,
+    app.subtitle,
+    app.packageName,
+    app.category,
+    app.developer,
+  ].some((value) => String(value || "").toLowerCase().includes(lower)))).slice(0, 30);
+}
+
+async function fetchPublicTopic(tag, page = 1, sort = "dateline_desc") {
+  const cleanTag = String(tag || "").trim();
+  if (!cleanTag) throw new Error("缺少话题名称");
+  const detailPayload = await coolapkGet("/topic/newTagDetail", { tag: cleanTag });
+  if (!isSupportedSource(detailPayload.data)) throw new Error("未找到该公开话题");
+  const detail = topicSummary(detailPayload.data);
+  const feedPayload = await coolapkGet("/topic/tagFeedList", {
+    tag: detail.tag,
+    page,
+    listType: normalizeFetchSort(sort),
+    blockStatus: 0,
+  });
+  const feeds = sortFeeds(feedItems(feedPayload.data).map(feedSummary), sort);
+  return { topic: detail, feeds, page, sort: normalizeFetchSort(sort) };
 }
 
 function publicUserSummary(user = {}) {
@@ -487,7 +595,7 @@ async function searchFeeds(keyword, page = 1, sort = "dateline_desc") {
   const now = new Date().toISOString();
   feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `search:${q}`, topic: "帖子搜索", now }));
   if (feeds.length) await saveArchive();
-  return feeds;
+  return feeds.slice(0, MAX_FETCH_LIMIT);
 }
 
 async function searchUsers(keyword, page = 1) {
@@ -514,7 +622,7 @@ async function searchUsers(keyword, page = 1) {
   const now = new Date().toISOString();
   users.forEach((user) => archiveUser(archive, user, now));
   if (users.length) await saveArchive();
-  return [...new Map(users.map((user) => [user.uid, user])).values()];
+  return [...new Map(users.map((user) => [user.uid, user])).values()].slice(0, 50);
 }
 
 async function fetchDiscoveryFeeds(mode = "recent", page = 1) {
@@ -1396,7 +1504,7 @@ async function proxyImage(url, response) {
     return sendJson(response, 400, { error: "图片地址格式错误" });
   }
   const hostname = source.hostname.toLowerCase();
-  if (!["image.coolapk.com", "avatar.coolapk.com"].includes(hostname)) {
+  if (!["image.coolapk.com", "avatar.coolapk.com", "pp.myapp.com", "static.coolapk.com"].includes(hostname)) {
     return sendJson(response, 403, { error: "图片来源未被允许" });
   }
   if (!/^https?:$/.test(source.protocol)) return sendJson(response, 400, { error: "图片协议错误" });
@@ -1445,6 +1553,38 @@ async function handleApi(request, response, url) {
       archive: archiveSummary(archive),
       retention: normalizeRetention(settings.retention),
     });
+  }
+  if (request.method === "GET" && url.pathname === "/api/web/channels") {
+    return sendJson(response, 200, { channels: webChannels() });
+  }
+  if (request.method === "GET" && url.pathname === "/api/web/channel") {
+    const channel = String(url.searchParams.get("channel") || "home").trim();
+    if (!webChannelConfig(channel)) return sendJson(response, 404, { error: "不支持该内容频道" });
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchWebChannel(channel, page));
+  }
+  if (request.method === "GET" && url.pathname === "/api/search/all") {
+    const q = String(url.searchParams.get("q") || "").trim();
+    if (!q) return sendJson(response, 400, { error: "请输入搜索关键词" });
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    const [feeds, users, topics, apps] = await Promise.all([
+      searchFeeds(q, page).catch(() => []),
+      searchUsers(q, page).catch(() => []),
+      searchTopics(q).catch(() => []),
+      searchApps(q, page).catch(() => []),
+    ]);
+    return sendJson(response, 200, { q, page, feeds, users, topics, apps });
+  }
+  const appMatch = url.pathname.match(/^\/api\/apps\/(\d+)$/);
+  if (appMatch && request.method === "GET") {
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchAppDetail(appMatch[1], page));
+  }
+  const publicTopicMatch = url.pathname.match(/^\/api\/web\/topics\/(.+)$/);
+  if (publicTopicMatch && request.method === "GET") {
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    const sort = normalizeFetchSort(url.searchParams.get("sort") || "dateline_desc");
+    return sendJson(response, 200, await fetchPublicTopic(decodeURIComponent(publicTopicMatch[1]), page, sort));
   }
   if (request.method === "GET" && url.pathname === "/api/settings") {
     return sendJson(response, 200, publicSettings());
