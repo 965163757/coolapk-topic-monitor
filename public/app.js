@@ -11,6 +11,9 @@ const topicDialog = $("#topicDialog");
 const topicDialogBody = $("#topicDialogBody");
 const userDialog = $("#userDialog");
 const userDialogBody = $("#userDialogBody");
+const collectionDialog = $("#collectionDialog");
+const collectionDialogBody = $("#collectionDialogBody");
+const composeDialog = $("#composeDialog");
 const ruleDialog = $("#ruleDialog");
 const lightbox = $("#lightbox");
 const lightboxImage = $("#lightboxImage");
@@ -23,6 +26,9 @@ const state = {
   topics: [],
   status: null,
   settings: null,
+  account: null,
+  notificationCounts: {},
+  compose: { type: "feed", id: "", title: "", files: [], previewUrls: [] },
   evaluations: [],
   evaluationStats: { total: 0, matched: 0, notified: 0, errors: 0 },
   channelCache: new Map(),
@@ -216,7 +222,7 @@ function feedCard(feed, options = {}) {
         ${feedImageMarkup(feed)}
       </div>
       <footer class="feed-meta">
-        <button type="button" data-feed="${escapeHtml(feed.id)}"><i class="ph ph-thumbs-up"></i>${compactNumber(feed.likes)}</button>
+        <button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i>${compactNumber(feed.likes)}</button>
         <button type="button" data-feed="${escapeHtml(feed.id)}"><i class="ph ph-chat-circle"></i>${compactNumber(feed.comments)}</button>
         <a class="share-action" href="${escapeHtml(feed.url || `https://www.coolapk.com/feed/${feed.id}`)}" target="_blank" rel="noreferrer"><i class="ph ph-share-network"></i>${compactNumber(feed.shares)}</a>
         ${scoreMarkup}
@@ -282,21 +288,34 @@ function renderShortcuts(shortcuts = []) {
 }
 
 async function loadBaseState() {
-  const [topicsPayload, statusPayload, evaluationsPayload] = await Promise.all([
+  const [topicsPayload, statusPayload, evaluationsPayload, accountPayload] = await Promise.all([
     api("/api/topics").catch(() => ({ topics: [] })),
     api("/api/status").catch(() => null),
     api("/api/evaluations?status=matched&page=1&pageSize=20").catch(() => ({ evaluations: [], stats: {} })),
+    api("/api/account").catch(() => null),
   ]);
   state.topics = topicsPayload.topics || [];
   state.status = statusPayload;
   state.evaluations = evaluationsPayload.evaluations || [];
   state.evaluationStats = evaluationsPayload.stats || state.evaluationStats;
+  state.account = accountPayload;
+  if (state.account?.configured) {
+    const countsPayload = await api("/api/notifications/counts").catch(() => ({ counts: {} }));
+    state.notificationCounts = countsPayload.counts || {};
+  } else {
+    state.notificationCounts = {};
+  }
   updateChrome();
 }
 
 function updateChrome(error = false) {
   $("#monitorNavCount").textContent = state.topics.length;
   $("#aiNavCount").textContent = Number(state.evaluationStats.matched || 0);
+  const notificationCount = Number(state.notificationCounts.badge || state.notificationCounts.notification || 0);
+  $("#notificationNavCount").textContent = notificationCount;
+  $("#notificationNavCount").hidden = notificationCount <= 0;
+  $("#accountChipName").textContent = state.account?.configured ? state.account.username || `UID ${state.account.uid}` : "连接酷安账号";
+  $("#accountChipStatus").textContent = state.account?.valid ? "账号会话正常" : state.account?.configured ? "会话待验证" : "公开浏览模式";
   const dot = $("#liveDot");
   dot.className = `live-dot ${error ? "error" : state.status ? "online" : ""}`;
   $("#railStatusTitle").textContent = error ? "连接异常" : state.status?.refreshing ? "正在同步" : state.status ? "服务运行中" : "正在连接";
@@ -311,7 +330,7 @@ function setActiveNavigation(route) {
 function parseRoute() {
   const value = location.hash.replace(/^#\/?/, "");
   const [path = "home", query = ""] = value.split("?");
-  const route = ["home", "discover", "apps", "topics", "monitor", "ai", "settings", "search"].includes(path) ? path : "home";
+  const route = ["home", "discover", "apps", "topics", "notifications", "account", "monitor", "ai", "settings", "search"].includes(path) ? path : "home";
   return { route, params: new URLSearchParams(query) };
 }
 
@@ -328,13 +347,15 @@ async function route({ force = false } = {}) {
     discover: "正在加载动态广场",
     apps: "正在加载应用与游戏",
     topics: "正在加载话题",
+    notifications: "正在加载通知与私信",
+    account: "正在加载账号中心",
     monitor: "正在加载监控工作台",
     ai: "正在加载 AI 命中记录",
     settings: "正在加载系统设置",
     search: "正在搜索",
   }[parsed.route]);
   try {
-    const renderers = { home: renderHome, discover: renderDiscover, apps: renderApps, topics: renderTopics, monitor: renderMonitor, ai: renderAi, settings: renderSettings, search: renderSearch };
+    const renderers = { home: renderHome, discover: renderDiscover, apps: renderApps, topics: renderTopics, notifications: renderNotifications, account: renderAccount, monitor: renderMonitor, ai: renderAi, settings: renderSettings, search: renderSearch };
     await renderers[parsed.route]({ force, sequence });
     if (sequence === state.requestSequence) {
       viewHost.focus({ preventScroll: true });
@@ -598,6 +619,136 @@ function aiRows(evaluations) {
   }).join("");
 }
 
+function accountRequiredCard(action = "使用账号互动功能") {
+  return `<section class="surface account-gate">
+    <span><i class="ph ph-user-circle-plus"></i></span>
+    <div><h2>连接酷安账号</h2><p>${escapeHtml(action)}需要有效的酷安会话。连接后即可点赞、关注、回复、发布、查看通知和个人内容。</p></div>
+    <a class="btn primary" href="#/account"><i class="ph ph-plugs-connected"></i>前往账号中心</a>
+  </section>`;
+}
+
+function notificationRows(items = []) {
+  if (!items.length) return emptyState("bell-slash", "暂无新内容", "该分类当前没有返回通知。");
+  return `<div class="notification-list">${items.map((item) => `<article class="notification-row">
+    ${avatarMarkup(item.avatar, item.username)}
+    <div><header><strong>${escapeHtml(stripHtml(item.title || item.username || "酷安通知"))}</strong><small>${relativeTime(item.createdAt)}</small></header><p>${escapeHtml(stripHtml(item.message || ""))}</p><footer>${item.uid ? `<button type="button" data-user="${escapeHtml(item.uid)}">查看用户</button>` : ""}${item.feedId ? `<button type="button" data-feed="${escapeHtml(item.feedId)}">查看动态</button>` : ""}</footer></div>
+  </article>`).join("")}</div>`;
+}
+
+function messageRows(items = []) {
+  if (!items.length) return emptyState("chats", "暂无私信会话", "当前账号没有返回私信会话。");
+  return `<div class="notification-list">${items.map((item) => `<article class="notification-row">
+    ${avatarMarkup(item.avatar, item.username)}
+    <div><header><strong>${escapeHtml(item.username)}</strong><small>${relativeTime(item.createdAt)}</small></header><p>${escapeHtml(stripHtml(item.message || "打开酷安 App 继续会话"))}</p><footer>${item.pinned ? `<span class="status-pill"><i class="ph ph-push-pin"></i>置顶</span>` : ""}${item.unreadCount ? `<span class="status-pill matched">${item.unreadCount} 条未读</span>` : ""}${item.uid ? `<button type="button" data-user="${escapeHtml(item.uid)}">查看主页</button>` : ""}</footer></div>
+  </article>`).join("")}</div>`;
+}
+
+async function renderNotifications({ sequence }) {
+  const account = await api("/api/account");
+  state.account = account;
+  if (sequence !== state.requestSequence) return;
+  if (!account.configured) {
+    viewHost.innerHTML = `<section class="page">${pageHead("INBOX", "通知与私信", "集中查看回复、@、点赞、关注和私信会话。")}${accountRequiredCard("查看账号通知")}</section>`;
+    return;
+  }
+  const tab = state.routeParams.get("tab") || "list";
+  const categories = [
+    ["list", "回复我的", "chat-circle"],
+    ["atMeList", "@我的动态", "at"],
+    ["atCommentMeList", "@我的回复", "chats-circle"],
+    ["feedLikeList", "收到的赞", "thumbs-up"],
+    ["contactsFollowList", "新增关注", "user-plus"],
+    ["messages", "私信", "envelope-simple"],
+  ];
+  const payload = tab === "messages"
+    ? await api("/api/messages?page=1")
+    : await api(`/api/notifications?type=${encodeURIComponent(tab)}&page=1`);
+  if (sequence !== state.requestSequence) return;
+  const counts = state.notificationCounts || {};
+  viewHost.innerHTML = `<section class="page">
+    ${pageHead("INBOX", "通知与私信", `已连接 ${account.username || `UID ${account.uid}`}，通知数据直接来自酷安账号。`, `<button class="btn secondary" type="button" data-route-refresh><i class="ph ph-arrows-clockwise"></i>刷新通知</button>`)}
+    <div class="metric-grid notification-metrics">
+      <article class="metric-card"><span class="metric-icon"><i class="ph ph-bell-ringing"></i></span><div><small>全部未读</small><strong>${compactNumber(counts.badge)}</strong></div></article>
+      <article class="metric-card"><span class="metric-icon blue"><i class="ph ph-chat-circle"></i></span><div><small>新回复</small><strong>${compactNumber(counts.commentme)}</strong></div></article>
+      <article class="metric-card"><span class="metric-icon violet"><i class="ph ph-thumbs-up"></i></span><div><small>收到的赞</small><strong>${compactNumber(counts.feedlike)}</strong></div></article>
+      <article class="metric-card"><span class="metric-icon amber"><i class="ph ph-envelope"></i></span><div><small>新私信</small><strong>${compactNumber(counts.message)}</strong></div></article>
+    </div>
+    <section class="surface inbox-layout">
+      <nav class="inbox-tabs">${categories.map(([key, label, icon]) => `<a class="${tab === key ? "active" : ""}" href="#/notifications?tab=${key}"><i class="ph ph-${icon}"></i><span>${label}</span></a>`).join("")}</nav>
+      <div class="inbox-content">${tab === "messages" ? messageRows(payload.messages) : notificationRows(payload.notifications)}</div>
+    </section>
+  </section>`;
+}
+
+function collectionCards(collections = []) {
+  if (!collections.length) return emptyState("bookmarks", "暂无收藏单", "该账号没有返回收藏单。");
+  return `<div class="collection-grid">${collections.map((item) => `<button class="collection-card" type="button" data-collection="${escapeHtml(item.id)}">
+    <span class="collection-cover">${item.cover ? `<img src="${escapeHtml(imageUrl(item.cover))}" alt="" loading="lazy" />` : `<i class="ph ph-bookmarks"></i>`}</span>
+    <div><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(stripHtml(item.description || item.subtitle || "酷安收藏单"))}</p><footer><span>${compactNumber(item.itemCount)} 项内容</span><span>${compactNumber(item.followers)} 关注</span></footer></div>
+  </button>`).join("")}</div>`;
+}
+
+function accountTabContent(tab, payload) {
+  if (["feeds", "articles", "questions"].includes(tab)) return feedStream(payload.feeds || []);
+  if (tab === "collections") return collectionCards(payload.collections || []);
+  if (["following", "fans"].includes(tab)) return userCards(payload.users || []);
+  if (["history", "recent"].includes(tab)) {
+    return `${feedStream(payload.feeds || [])}${payload.apps?.length ? `<section class="detail-section"><h3>访问过的应用</h3>${appGrid(payload.apps)}</section>` : ""}${payload.topics?.length ? `<section class="detail-section"><h3>访问过的话题</h3>${topicGrid(payload.topics)}</section>` : ""}`;
+  }
+  return "";
+}
+
+async function renderAccount({ sequence }) {
+  const account = await api("/api/account");
+  state.account = account;
+  if (sequence !== state.requestSequence) return;
+  if (!account.configured) {
+    viewHost.innerHTML = `<section class="page account-page">
+      ${pageHead("COOLAPK ACCOUNT", "连接酷安账号", "连接一次会话，即可在网页内使用点赞、关注、回复、发布、通知、私信列表、收藏和浏览历史。")}
+      <div class="account-connect-layout">
+        <form class="surface account-connect-card" id="accountForm">
+          <header class="settings-card-head"><span><i class="ph ph-cookie"></i></span><div><h2>导入账号会话</h2><p>会话保存在当前服务器的 data/settings.json，不会返回到前端页面。</p></div></header>
+          <div class="settings-fields">
+            <label><span>UID</span><input id="coolapkUid" inputmode="numeric" autocomplete="off" placeholder="酷安数字 UID" required /></label>
+            <label><span>用户名</span><input id="coolapkUsername" autocomplete="username" placeholder="酷安用户名" required /></label>
+            <label class="wide"><span>Token</span><input id="coolapkToken" type="password" autocomplete="new-password" placeholder="登录 Cookie 中的 token" required /></label>
+          </div>
+          <footer class="settings-actions"><span id="accountConnectStatus">填写后将立即校验会话</span><button class="btn primary" type="submit"><i class="ph ph-plugs-connected"></i>连接并校验</button></footer>
+        </form>
+        <aside class="surface session-guide"><span><i class="ph ph-number-circle-one"></i></span><div><h3>取得会话字段</h3><p>在浏览器打开酷安账号页完成登录，再从开发者工具的 Application / Cookies 中读取 <code>uid</code>、<code>username</code>、<code>token</code> 三项。</p><a href="https://account.coolapk.com/auth/loginByCoolapk" target="_blank" rel="noreferrer">打开酷安登录页<i class="ph ph-arrow-square-out"></i></a></div><span><i class="ph ph-number-circle-two"></i></span><div><h3>导入并校验</h3><p>本站调用 <code>/v6/account/checkLoginInfo</code> 验证，通过后账号功能立即启用。</p></div></aside>
+      </div>
+    </section>`;
+    return;
+  }
+
+  const tab = state.routeParams.get("tab") || "feeds";
+  const contentRequest = tab === "feeds" ? api(`/api/users/${account.uid}/feeds?branch=feed&page=1`)
+    : tab === "articles" ? api(`/api/users/${account.uid}/feeds?branch=htmlFeed&page=1`)
+      : tab === "questions" ? api(`/api/users/${account.uid}/feeds?branch=questionAndAnswer&page=1`)
+        : tab === "collections" ? api(`/api/users/${account.uid}/collections?page=1`)
+          : tab === "following" ? api(`/api/users/${account.uid}/connections?type=followList&page=1`)
+            : tab === "fans" ? api(`/api/users/${account.uid}/connections?type=fansList&page=1`)
+              : api(`/api/account/history?type=${tab === "recent" ? "recent" : "history"}&page=1`);
+  const [profilePayload, contentPayload] = await Promise.all([
+    api(`/api/users/${encodeURIComponent(account.uid)}?refresh=1`).catch(() => ({ profile: { uid: account.uid, username: account.username } })),
+    contentRequest.catch((error) => ({ error: error.message })),
+  ]);
+  if (sequence !== state.requestSequence) return;
+  const profile = profilePayload.profile || {};
+  const tabs = [["feeds", "动态"], ["articles", "文章"], ["questions", "问答"], ["collections", "收藏"], ["following", "关注"], ["fans", "粉丝"], ["history", "历史"], ["recent", "常去"]];
+  viewHost.innerHTML = `<section class="page account-page">
+    ${pageHead("MY COOLAPK", "账号中心", "完整管理个人内容、社区关系、收藏与浏览记录。", `<button class="btn primary" type="button" data-compose="feed"><i class="ph ph-pencil-simple-line"></i>发布动态</button>`)}
+    <section class="surface account-profile">
+      ${avatarMarkup(profile.avatar, profile.username, "account-avatar")}
+      <div class="account-profile-main"><small>已连接酷安账号</small><h2>${escapeHtml(profile.username || account.username)}</h2><p>${escapeHtml(profile.bio || profile.verifyLabel || `UID ${account.uid}`)}</p></div>
+      <div class="profile-stats"><span><strong>${compactNumber(profile.followers)}</strong><small>粉丝</small></span><span><strong>${compactNumber(profile.following)}</strong><small>关注</small></span><span><strong>${compactNumber(profile.feeds)}</strong><small>动态</small></span><span><strong>${compactNumber(profile.likes)}</strong><small>获赞</small></span></div>
+      <div class="account-actions"><button class="btn secondary" type="button" id="testAccount"><i class="ph ph-arrows-clockwise"></i>校验会话</button><button class="btn danger" type="button" id="disconnectAccount"><i class="ph ph-sign-out"></i>断开连接</button></div>
+    </section>
+    <div class="account-tabs">${tabs.map(([key, label]) => `<a class="${tab === key ? "active" : ""}" href="#/account?tab=${key}">${label}</a>`).join("")}</div>
+    <section class="account-content">${contentPayload.error ? `<section class="surface">${emptyState("warning-circle", "账号内容加载失败", contentPayload.error)}</section>` : accountTabContent(tab, contentPayload)}</section>
+  </section>`;
+}
+
 async function renderSettings({ sequence }) {
   const [settings, summary] = await Promise.all([
     api("/api/settings"),
@@ -713,13 +864,13 @@ async function openFeed(id) {
 }
 
 function commentMarkup(reply) {
-  return `<article class="comment">${avatarMarkup(reply.avatar, reply.username, "avatar")}<div class="comment-main"><header class="comment-head"><button type="button" data-user="${escapeHtml(reply.userId || "")}">${escapeHtml(reply.username || "酷友")}</button>${reply.isAuthor ? `<span class="author-label">作者</span>` : ""}<small>${relativeTime(reply.createdAt)}</small></header><p>${reply.replyTo ? `<span style="color:var(--green)">@${escapeHtml(reply.replyTo)}</span> ` : ""}${escapeHtml(stripHtml(reply.message || ""))}</p>${reply.picture ? `<button type="button" data-image="${escapeHtml(reply.picture)}"><img src="${escapeHtml(imageUrl(reply.picture))}" alt="评论图片" style="max-height:180px;border-radius:9px" /></button>` : ""}<footer><span><i class="ph ph-thumbs-up"></i> ${compactNumber(reply.likes)}</span><span><i class="ph ph-chat-circle"></i> ${compactNumber(reply.replyCount)}</span></footer>${reply.replies?.length ? `<div class="nested-replies">${reply.replies.slice(0, 5).map((child) => `<p><b>${escapeHtml(child.username)}：</b>${escapeHtml(stripHtml(child.message))}</p>`).join("")}</div>` : ""}</div></article>`;
+  return `<article class="comment" data-reply-card="${escapeHtml(reply.id)}">${avatarMarkup(reply.avatar, reply.username, "avatar")}<div class="comment-main"><header class="comment-head"><button type="button" data-user="${escapeHtml(reply.userId || "")}">${escapeHtml(reply.username || "酷友")}</button>${reply.isAuthor ? `<span class="author-label">作者</span>` : ""}<small>${relativeTime(reply.createdAt)}</small></header><p>${reply.replyTo ? `<span style="color:var(--green)">@${escapeHtml(reply.replyTo)}</span> ` : ""}${escapeHtml(stripHtml(reply.message || ""))}</p>${reply.picture ? `<button type="button" data-image="${escapeHtml(reply.picture)}"><img src="${escapeHtml(imageUrl(reply.picture))}" alt="评论图片" style="max-height:180px;border-radius:9px" /></button>` : ""}<footer><button class="${reply.liked ? "active" : ""}" type="button" data-reply-like="${escapeHtml(reply.id)}" data-liked="${reply.liked ? "1" : "0"}"><i class="ph${reply.liked ? "-fill" : ""} ph-thumbs-up"></i> ${compactNumber(reply.likes)}</button><button type="button" data-compose="reply" data-compose-id="${escapeHtml(reply.id)}" data-compose-title="回复 ${escapeHtml(reply.username || "酷友")}"><i class="ph ph-chat-circle"></i> 回复</button></footer>${reply.replies?.length ? `<div class="nested-replies">${reply.replies.slice(0, 5).map((child) => `<p><b>${escapeHtml(child.username)}：</b>${escapeHtml(stripHtml(child.message))}</p>`).join("")}</div>` : ""}</div></article>`;
 }
 
 function renderFeedDetail(payload) {
   const feed = payload.feed;
   $("#feedDialogSubtitle").textContent = feed.topic || `${feed.comments || payload.replies?.length || 0} 条评论`;
-  feedDialogBody.innerHTML = `<article class="detail-feed"><header class="feed-author">${avatarMarkup(feed.avatar, feed.username)}<div class="feed-author-info"><button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username)}</button><small>${formatDate(feed.createdAt)}${feed.device ? ` · ${escapeHtml(feed.device)}` : ""}</small></div>${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(feed.topic)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}</header><h2 class="feed-title">${escapeHtml(displayFeedTitle(feed))}</h2><p class="feed-text">${escapeHtml(stripHtml(feed.message || ""))}</p>${feedImageMarkup(feed)}<footer class="feed-meta" style="margin:18px -13px -24px"><button type="button"><i class="ph ph-thumbs-up"></i>${compactNumber(feed.likes)}</button><button type="button"><i class="ph ph-star"></i>${compactNumber(feed.favorites)}</button><button type="button"><i class="ph ph-chat-circle"></i>${compactNumber(feed.replyCount || feed.comments)}</button><a href="${escapeHtml(feed.url)}" target="_blank" rel="noreferrer" class="open-feed">酷安 App / 网页<i class="ph ph-arrow-square-out"></i></a></footer></article><section class="comments-section"><header class="comments-head"><h3>全部评论</h3><span>第 <b id="replyPageNumber">1</b> 页</span></header><div class="comment-list" id="commentList">${payload.replies?.length ? payload.replies.map(commentMarkup).join("") : emptyState("chat-circle", "还没有评论", "该动态暂时没有返回公开评论。")}</div><div class="load-more"><button class="btn secondary" id="loadMoreReplies" type="button" data-load-replies ${payload.replies?.length ? "" : "disabled"}><i class="ph ph-chat-circle-dots"></i>加载更多评论</button></div></section>`;
+  feedDialogBody.innerHTML = `<article class="detail-feed"><header class="feed-author">${avatarMarkup(feed.avatar, feed.username)}<div class="feed-author-info"><button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username)}</button><small>${formatDate(feed.createdAt)}${feed.device ? ` · ${escapeHtml(feed.device)}` : ""}</small></div>${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(feed.topic)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}</header><h2 class="feed-title">${escapeHtml(displayFeedTitle(feed))}</h2><p class="feed-text">${escapeHtml(stripHtml(feed.message || ""))}</p>${feedImageMarkup(feed)}<footer class="feed-meta" style="margin:18px -13px -24px"><button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i>${compactNumber(feed.likes)}</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="likes"><i class="ph ph-users"></i>点赞用户</button><button type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态"><i class="ph ph-chat-circle"></i>${compactNumber(feed.replyCount || feed.comments)}</button><a href="${escapeHtml(feed.url)}" target="_blank" rel="noreferrer" class="open-feed">酷安 App / 网页<i class="ph ph-arrow-square-out"></i></a></footer></article><section class="comments-section"><header class="comments-head"><h3>全部评论</h3><span>第 <b id="replyPageNumber">1</b> 页</span></header>${state.account?.configured ? `<button class="quick-reply" type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态"><i class="ph ph-pencil-simple-line"></i>写下你的回复</button>` : ""}<div class="comment-list" id="commentList">${payload.replies?.length ? payload.replies.map(commentMarkup).join("") : emptyState("chat-circle", "还没有评论", "该动态暂时没有返回公开评论。")}</div><div class="load-more"><button class="btn secondary" id="loadMoreReplies" type="button" data-load-replies ${payload.replies?.length ? "" : "disabled"}><i class="ph ph-chat-circle-dots"></i>加载更多评论</button></div></section>`;
 }
 
 async function loadMoreReplies() {
@@ -767,7 +918,7 @@ async function openTopic(tag) {
     const payload = await api(`/api/web/topics/${encodeURIComponent(tag)}?page=1`);
     const topic = payload.topic;
     const monitored = state.topics.some((item) => item.sourceKey === topic.sourceKey || item.tag === topic.tag);
-    topicDialogBody.innerHTML = `<section class="topic-detail-hero">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" />` : `<span><i class="ph ph-hash"></i></span>`}<h2>${escapeHtml(topic.title || topic.tag)}</h2><p>${escapeHtml(stripHtml(topic.description || topic.intro || "公开话题"))}</p><div class="profile-stats"><span><strong>${compactNumber(topic.followers)}</strong><small>关注</small></span><span><strong>${compactNumber(topic.posts)}</strong><small>动态</small></span><span><strong>${compactNumber(topic.hot)}</strong><small>热度</small></span></div><button class="btn primary" style="margin-top:16px" type="button" data-monitor-add="${escapeHtml(topic.sourceKey || topic.tag)}" ${monitored ? "disabled" : ""}><i class="ph ph-radar"></i>${monitored ? "已加入监控" : "加入监控"}</button></section><section class="detail-section"><h3>最新动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
+    topicDialogBody.innerHTML = `<section class="topic-detail-hero">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" />` : `<span><i class="ph ph-hash"></i></span>`}<h2>${escapeHtml(topic.title || topic.tag)}</h2><p>${escapeHtml(stripHtml(topic.description || topic.intro || "公开话题"))}</p><div class="profile-stats"><span><strong>${compactNumber(topic.followers)}</strong><small>关注</small></span><span><strong>${compactNumber(topic.posts)}</strong><small>动态</small></span><span><strong>${compactNumber(topic.hot)}</strong><small>热度</small></span></div><div class="detail-actions"><button class="btn ${topic.followed ? "secondary active" : "primary"}" type="button" data-topic-follow="${escapeHtml(topic.tag)}" data-followed="${topic.followed ? "1" : "0"}"><i class="ph ph-${topic.followed ? "check" : "plus"}"></i>${topic.followed ? "已关注" : "关注话题"}</button><button class="btn secondary" type="button" data-monitor-add="${escapeHtml(topic.sourceKey || topic.tag)}" ${monitored ? "disabled" : ""}><i class="ph ph-radar"></i>${monitored ? "已加入监控" : "加入监控"}</button></div></section><section class="detail-section"><h3>最新动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
   } catch (error) {
     topicDialogBody.innerHTML = emptyState("warning-circle", "话题详情加载失败", error.message);
   }
@@ -781,11 +932,143 @@ async function openUser(uid) {
   userDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取用户公开主页…</span></div>`;
   showDialog(userDialog);
   try {
-    const payload = await api(`/api/users/${encodeURIComponent(uid)}`);
+    const [payload, remoteFeeds, collectionPayload] = await Promise.all([
+      api(`/api/users/${encodeURIComponent(uid)}`),
+      state.account?.configured ? api(`/api/users/${encodeURIComponent(uid)}/feeds?branch=feed&page=1`).catch(() => ({ feeds: [] })) : Promise.resolve({ feeds: [] }),
+      state.account?.configured ? api(`/api/users/${encodeURIComponent(uid)}/collections?page=1`).catch(() => ({ collections: [] })) : Promise.resolve({ collections: [] }),
+    ]);
     const profile = payload.profile;
-    userDialogBody.innerHTML = `<section class="user-detail-hero">${profile.avatar ? `<img src="${escapeHtml(imageUrl(profile.avatar))}" alt="" />` : `<span><i class="ph ph-user"></i></span>`}<h2>${escapeHtml(profile.username)}</h2><p>${escapeHtml(profile.bio || profile.verifyLabel || `UID ${profile.uid}`)}</p><div class="profile-stats"><span><strong>${compactNumber(profile.followers)}</strong><small>粉丝</small></span><span><strong>${compactNumber(profile.following)}</strong><small>关注</small></span><span><strong>${compactNumber(profile.feeds)}</strong><small>动态</small></span><span><strong>${compactNumber(profile.likes)}</strong><small>获赞</small></span></div></section><section class="detail-section"><h3>本站已归档动态</h3>${feedStream(payload.localFeeds || [], { compact: true })}</section>`;
+    const feeds = remoteFeeds.feeds?.length ? remoteFeeds.feeds : payload.localFeeds || [];
+    const ownProfile = String(profile.uid) === String(state.account?.uid);
+    userDialogBody.innerHTML = `<section class="user-detail-hero">${profile.avatar ? `<img src="${escapeHtml(imageUrl(profile.avatar))}" alt="" />` : `<span><i class="ph ph-user"></i></span>`}<h2>${escapeHtml(profile.username)}</h2><p>${escapeHtml(profile.bio || profile.verifyLabel || `UID ${profile.uid}`)}</p><div class="profile-stats"><span><strong>${compactNumber(profile.followers)}</strong><small>粉丝</small></span><span><strong>${compactNumber(profile.following)}</strong><small>关注</small></span><span><strong>${compactNumber(profile.feeds)}</strong><small>动态</small></span><span><strong>${compactNumber(profile.likes)}</strong><small>获赞</small></span></div>${!ownProfile ? `<button class="btn ${profile.followed ? "secondary active" : "primary"}" style="margin-top:16px" type="button" data-user-follow="${escapeHtml(profile.uid)}" data-followed="${profile.followed ? "1" : "0"}"><i class="ph ph-${profile.followed ? "check" : "user-plus"}"></i>${profile.followed ? "已关注" : "关注"}</button>` : ""}</section><section class="detail-section"><h3>${remoteFeeds.feeds?.length ? "最新动态" : "本站已归档动态"}</h3>${feedStream(feeds, { compact: true })}</section>${collectionPayload.collections?.length ? `<section class="detail-section"><h3>公开收藏单</h3>${collectionCards(collectionPayload.collections)}</section>` : ""}`;
   } catch (error) {
     userDialogBody.innerHTML = emptyState("warning-circle", "用户主页加载失败", error.message);
+  }
+}
+
+async function openCollection(id) {
+  if (!id) return;
+  collectionDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取收藏单…</span></div>`;
+  showDialog(collectionDialog);
+  try {
+    const payload = await api(`/api/collections/${encodeURIComponent(id)}?page=1`);
+    const item = payload.collection;
+    collectionDialogBody.innerHTML = `<section class="collection-detail-hero">${item.cover ? `<img src="${escapeHtml(imageUrl(item.cover))}" alt="" />` : `<span><i class="ph ph-bookmarks"></i></span>`}<div><small>酷安收藏单</small><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(stripHtml(item.description || item.subtitle || ""))}</p><div class="detail-actions"><button class="btn ${item.followed ? "secondary active" : "primary"}" type="button" data-collection-action="${escapeHtml(item.id)}" data-action="follow" data-enabled="${item.followed ? "1" : "0"}"><i class="ph ph-user-plus"></i>${item.followed ? "已关注" : "关注收藏单"}</button><button class="btn secondary ${item.liked ? "active" : ""}" type="button" data-collection-action="${escapeHtml(item.id)}" data-action="like" data-enabled="${item.liked ? "1" : "0"}"><i class="ph ph-thumbs-up"></i>${item.liked ? "已赞" : "点赞"}</button></div></div></section>${payload.feeds?.length ? `<section class="detail-section"><h3>收藏动态</h3>${feedStream(payload.feeds, { compact: true })}</section>` : ""}${payload.apps?.length ? `<section class="detail-section"><h3>收藏应用</h3>${appGrid(payload.apps)}</section>` : ""}`;
+  } catch (error) {
+    collectionDialogBody.innerHTML = emptyState("warning-circle", "收藏单加载失败", error.message);
+  }
+}
+
+function openComposer(type = "feed", id = "", title = "") {
+  if (!state.account?.configured) {
+    closeDialog(feedDialog);
+    location.hash = "#/account";
+    toast("连接酷安账号后即可发布和回复");
+    return;
+  }
+  state.compose.previewUrls?.forEach((url) => URL.revokeObjectURL(url));
+  state.compose = { type, id: String(id || ""), title: String(title || ""), files: [], previewUrls: [] };
+  const isFeed = type === "feed";
+  $("#composeTitle").textContent = isFeed ? "发布动态" : title || "回复动态";
+  $("#composeSubtitle").textContent = isFeed ? "分享到酷安社区" : "回复将直接发布到当前会话";
+  $("#composeMessage").value = "";
+  $("#composeImages").value = "";
+  $("#composeMediaPreview").innerHTML = "";
+  $("#composeCount").textContent = "0";
+  $("#composeStatus").textContent = isFeed ? "支持 #话题# 与 @酷友" : "请输入回复内容";
+  showDialog(composeDialog);
+  setTimeout(() => $("#composeMessage").focus(), 80);
+}
+
+function fileDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error(`读取图片失败：${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderComposeMedia() {
+  $("#composeMediaPreview").innerHTML = state.compose.files.map((file, index) => `<div><img src="${escapeHtml(state.compose.previewUrls[index])}" alt="${escapeHtml(file.name)}" /><button type="button" data-remove-compose-image="${index}" aria-label="移除图片"><i class="ph ph-x"></i></button></div>`).join("");
+}
+
+async function submitComposer(event) {
+  event.preventDefault();
+  const message = $("#composeMessage").value.trim();
+  if (!message) {
+    $("#composeStatus").textContent = "请输入内容";
+    return;
+  }
+  const button = $("#submitCompose");
+  button.disabled = true;
+  button.innerHTML = `<i class="ph ph-circle-notch"></i>正在发送`;
+  try {
+    const context = state.compose;
+    const pictures = [];
+    for (let index = 0; index < context.files.length; index += 1) {
+      $("#composeStatus").textContent = `正在上传图片 ${index + 1}/${context.files.length}…`;
+      const upload = await api("/api/account/upload-image", {
+        method: "POST",
+        body: JSON.stringify({ filename: context.files[index].name, dataUrl: await fileDataUrl(context.files[index]) }),
+      });
+      pictures.push(upload.url);
+    }
+    $("#composeStatus").textContent = context.type === "feed" ? "正在发布动态…" : "正在发布回复…";
+    const path = context.type === "feed"
+      ? "/api/feeds"
+      : context.type === "reply"
+        ? `/api/replies/${encodeURIComponent(context.id)}/replies`
+        : `/api/feeds/${encodeURIComponent(context.id)}/replies`;
+    await api(path, { method: "POST", body: JSON.stringify({ message, pictures }) });
+    toast(context.type === "feed" ? "动态发布成功" : "回复发布成功", "success");
+    closeDialog(composeDialog);
+    if (context.type !== "feed" && state.activeFeedId) await openFeed(state.activeFeedId);
+    else if (state.route === "account") await route({ force: true });
+  } catch (error) {
+    $("#composeStatus").textContent = error.message;
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.innerHTML = `<i class="ph ph-paper-plane-tilt"></i>发布`;
+  }
+}
+
+async function toggleInteraction(button, path, property, next) {
+  if (!state.account?.configured) {
+    location.hash = "#/account";
+    toast("连接酷安账号后即可进行互动");
+    return;
+  }
+  button.disabled = true;
+  try {
+    const payload = await api(path, { method: "POST", body: JSON.stringify({ [property]: next }) });
+    button.dataset[property] = payload[property] ? "1" : "0";
+    button.classList.toggle("active", Boolean(payload[property]));
+    const icon = $("i", button);
+    if (icon) icon.className = `ph${payload[property] ? "-fill" : ""} ph-${property === "followed" ? "check" : "thumbs-up"}`;
+    if (property === "followed") {
+      button.innerHTML = `<i class="ph ph-${payload.followed ? "check" : "user-plus"}"></i>${payload.followed ? "已关注" : "关注"}`;
+    }
+    toast(payload.message || "操作成功", "success");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function openFeedAux(id, type) {
+  const labels = { likes: "点赞用户", forwards: "转发记录", history: "编辑历史" };
+  const original = feedDialogBody.innerHTML;
+  feedDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取${labels[type] || "相关信息"}…</span></div>`;
+  try {
+    const payload = await api(`/api/feeds/${encodeURIComponent(id)}/${type}?page=1`);
+    const content = payload.users?.length ? userCards(payload.users) : payload.feeds?.length ? feedStream(payload.feeds, { compact: true }) : payload.items?.length ? `<div class="history-list">${payload.items.map((item) => `<article><small>${formatDate(item.createdAt)}</small><p>${escapeHtml(stripHtml(item.message))}</p></article>`).join("")}</div>` : emptyState("tray", "暂无记录", "当前没有返回相关数据。");
+    feedDialogBody.innerHTML = `<button class="detail-back" type="button" data-feed="${escapeHtml(id)}"><i class="ph ph-arrow-left"></i>返回动态详情</button><section class="detail-section"><h3>${labels[type]}</h3>${content}</section>`;
+  } catch (error) {
+    feedDialogBody.innerHTML = `${emptyState("warning-circle", "加载失败", error.message)}<button class="btn secondary" type="button" data-feed="${escapeHtml(id)}">返回详情</button>`;
+    if (!state.account?.configured) feedDialogBody.innerHTML = original;
   }
 }
 
@@ -955,7 +1238,49 @@ document.addEventListener("click", async (event) => {
   if (target.matches("[data-app]")) openApp(target.dataset.app);
   if (target.matches("[data-public-topic]")) openTopic(target.dataset.publicTopic);
   if (target.matches("[data-user]")) openUser(target.dataset.user);
+  if (target.matches("[data-collection]")) openCollection(target.dataset.collection);
   if (target.matches("[data-image]")) openLightbox(target.dataset.image, target.dataset.caption);
+  if (target.matches("[data-remove-compose-image]")) {
+    const index = Number(target.dataset.removeComposeImage);
+    URL.revokeObjectURL(state.compose.previewUrls[index]);
+    state.compose.files.splice(index, 1);
+    state.compose.previewUrls.splice(index, 1);
+    renderComposeMedia();
+  }
+  if (target.matches("[data-compose]")) openComposer(target.dataset.compose, target.dataset.composeId, target.dataset.composeTitle);
+  if (target.matches("[data-feed-like]")) {
+    const next = target.dataset.liked !== "1";
+    toggleInteraction(target, `/api/interactions/feeds/${encodeURIComponent(target.dataset.feedLike)}/like`, "liked", next);
+  }
+  if (target.matches("[data-reply-like]")) {
+    const next = target.dataset.liked !== "1";
+    toggleInteraction(target, `/api/interactions/replies/${encodeURIComponent(target.dataset.replyLike)}/like`, "liked", next);
+  }
+  if (target.matches("[data-user-follow]")) {
+    const next = target.dataset.followed !== "1";
+    toggleInteraction(target, `/api/interactions/users/${encodeURIComponent(target.dataset.userFollow)}/follow`, "followed", next);
+  }
+  if (target.matches("[data-topic-follow]")) {
+    const next = target.dataset.followed !== "1";
+    toggleInteraction(target, `/api/interactions/topics/${encodeURIComponent(target.dataset.topicFollow)}/follow`, "followed", next);
+  }
+  if (target.matches("[data-collection-action]")) {
+    if (!state.account?.configured) return void (location.hash = "#/account");
+    const enabled = target.dataset.enabled !== "1";
+    target.disabled = true;
+    try {
+      const payload = await api(`/api/interactions/collections/${encodeURIComponent(target.dataset.collectionAction)}/${target.dataset.action}`, { method: "POST", body: JSON.stringify({ enabled }) });
+      target.dataset.enabled = payload.enabled ? "1" : "0";
+      target.classList.toggle("active", payload.enabled);
+      target.innerHTML = target.dataset.action === "follow"
+        ? `<i class="ph ph-${payload.enabled ? "check" : "user-plus"}"></i>${payload.enabled ? "已关注" : "关注收藏单"}`
+        : `<i class="ph ph-thumbs-up"></i>${payload.enabled ? "已赞" : "点赞"}`;
+      toast(payload.message || "操作成功", "success");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally { target.disabled = false; }
+  }
+  if (target.matches("[data-feed-aux]")) openFeedAux(target.dataset.feedAux, target.dataset.auxType);
   if (target.matches("[data-load-replies]")) loadMoreReplies();
   if (target.matches("[data-discover-mode]")) {
     state.discover.mode = target.dataset.discoverMode;
@@ -1047,6 +1372,30 @@ viewHost.addEventListener("submit", async (event) => {
       toast(error.message, "error");
     }
   }
+  if (event.target.matches("#accountForm")) {
+    event.preventDefault();
+    const status = $("#accountConnectStatus");
+    const button = $('button[type="submit"]', event.target);
+    status.textContent = "正在校验会话…";
+    button.disabled = true;
+    try {
+      const payload = await api("/api/account", {
+        method: "PUT",
+        body: JSON.stringify({
+          uid: $("#coolapkUid").value.trim(),
+          username: $("#coolapkUsername").value.trim(),
+          token: $("#coolapkToken").value.trim(),
+        }),
+      });
+      state.account = payload.account;
+      toast(`已连接酷安账号：${payload.account.username}`, "success");
+      await loadBaseState();
+      await route({ force: true });
+    } catch (error) {
+      status.textContent = error.message;
+      toast(error.message, "error");
+    } finally { button.disabled = false; }
+  }
 });
 
 let monitorFilterTimer = null;
@@ -1122,6 +1471,32 @@ viewHost.addEventListener("click", async (event) => {
       $("#cleanupStatus").textContent = error.message;
     } finally { button.disabled = false; }
   }
+  if (button.matches("#testAccount")) {
+    button.disabled = true;
+    try {
+      const payload = await api("/api/account/test", { method: "POST" });
+      state.account = payload.account;
+      updateChrome();
+      toast("酷安会话有效", "success");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally { button.disabled = false; }
+  }
+  if (button.matches("#disconnectAccount")) {
+    if (!confirm("断开当前酷安账号会话？监控和归档数据不会删除。")) return;
+    button.disabled = true;
+    try {
+      await api("/api/account", { method: "DELETE" });
+      state.account = null;
+      state.notificationCounts = {};
+      updateChrome();
+      toast("已断开酷安账号", "success");
+      await route({ force: true });
+    } catch (error) {
+      toast(error.message, "error");
+      button.disabled = false;
+    }
+  }
 });
 
 $("#globalSearchForm").addEventListener("submit", (event) => {
@@ -1148,6 +1523,21 @@ function applyTheme(theme) {
 }
 
 $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+$("#composeTrigger").addEventListener("click", () => openComposer("feed"));
+$("#composeForm").addEventListener("submit", submitComposer);
+$("#composeMessage").addEventListener("input", (event) => {
+  $("#composeCount").textContent = String(event.target.value.length);
+});
+$("#composeImages").addEventListener("change", (event) => {
+  const candidates = [...event.target.files].filter((file) => /^image\/(?:png|jpe?g|webp|gif)$/i.test(file.type) && file.size <= 10 * 1024 * 1024);
+  const files = [...state.compose.files, ...candidates].slice(0, 9);
+  state.compose.previewUrls?.forEach((url) => URL.revokeObjectURL(url));
+  state.compose.files = files;
+  state.compose.previewUrls = files.map((file) => URL.createObjectURL(file));
+  renderComposeMedia();
+  if (candidates.length !== event.target.files.length) toast("已跳过格式不支持或超过 10MB 的图片", "error");
+  event.target.value = "";
+});
 ruleDialog.addEventListener("change", (event) => { if (event.target.name === "ruleMode") syncRuleMode(); });
 $("#ruleForm").addEventListener("submit", saveRule);
 $("#analyzeRule").addEventListener("click", analyzeRule);

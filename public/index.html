@@ -24,6 +24,8 @@
           <a href="#/discover" data-nav="discover"><i class="ph ph-compass"></i><span>动态广场</span></a>
           <a href="#/apps" data-nav="apps"><i class="ph ph-squares-four"></i><span>应用与游戏</span></a>
           <a href="#/topics" data-nav="topics"><i class="ph ph-hash"></i><span>话题</span></a>
+          <a href="#/notifications" data-nav="notifications"><i class="ph ph-bell"></i><span>通知与私信</span><b id="notificationNavCount">0</b></a>
+          <a href="#/account" data-nav="account"><i class="ph ph-user-circle"></i><span>账号中心</span></a>
           <p>智能工作台</p>
           <a href="#/monitor" data-nav="monitor"><i class="ph ph-radar"></i><span>话题监控</span><b id="monitorNavCount">0</b></a>
           <a href="#/ai" data-nav="ai"><i class="ph ph-sparkle"></i><span>AI 命中</span><b class="accent" id="aiNavCount">0</b></a>
@@ -48,9 +50,10 @@
             <kbd>Enter</kbd>
           </form>
           <div class="top-actions">
+            <button class="compose-trigger" id="composeTrigger" type="button" aria-label="发布动态"><i class="ph ph-pencil-simple-line"></i><span>写动态</span></button>
             <button id="quickRefresh" type="button" aria-label="刷新当前页面"><i class="ph ph-arrows-clockwise"></i></button>
             <button id="themeToggle" type="button" aria-label="切换深色模式"><i class="ph ph-moon"></i></button>
-            <a class="profile-chip" href="#/settings"><span><i class="ph ph-user"></i></span><div><strong>本地工作台</strong><small>公开浏览模式</small></div></a>
+            <a class="profile-chip" id="accountChip" href="#/account"><span id="accountChipAvatar"><i class="ph ph-user"></i></span><div><strong id="accountChipName">连接酷安账号</strong><small id="accountChipStatus">公开浏览模式</small></div></a>
           </div>
         </header>
 
@@ -67,7 +70,7 @@
           <a href="#/discover" data-nav="discover"><i class="ph ph-compass"></i><span>动态</span></a>
           <a href="#/apps" data-nav="apps"><i class="ph ph-squares-four"></i><span>应用</span></a>
           <a href="#/monitor" data-nav="monitor"><i class="ph ph-radar"></i><span>监控</span></a>
-          <a href="#/settings" data-nav="settings"><i class="ph ph-gear-six"></i><span>设置</span></a>
+          <a href="#/account" data-nav="account"><i class="ph ph-user-circle"></i><span>我的</span></a>
         </nav>
       </div>
     </div>
@@ -102,6 +105,28 @@
         <button type="button" data-close="userDialog" aria-label="关闭"><i class="ph ph-x"></i></button>
       </header>
       <div class="dialog-body" id="userDialogBody"></div>
+    </dialog>
+
+    <dialog class="sheet-dialog collection-dialog" id="collectionDialog">
+      <header class="dialog-bar">
+        <div><span class="dialog-icon violet"><i class="ph ph-bookmarks"></i></span><div><strong>收藏单详情</strong><small>收藏内容与应用</small></div></div>
+        <button type="button" data-close="collectionDialog" aria-label="关闭"><i class="ph ph-x"></i></button>
+      </header>
+      <div class="dialog-body" id="collectionDialogBody"></div>
+    </dialog>
+
+    <dialog class="sheet-dialog compose-dialog" id="composeDialog">
+      <header class="dialog-bar">
+        <div><span class="dialog-icon green"><i class="ph ph-pencil-simple-line"></i></span><div><strong id="composeTitle">发布动态</strong><small id="composeSubtitle">分享到酷安社区</small></div></div>
+        <button type="button" data-close="composeDialog" aria-label="关闭"><i class="ph ph-x"></i></button>
+      </header>
+      <form class="dialog-body compose-form" id="composeForm">
+        <textarea id="composeMessage" rows="10" maxlength="10000" placeholder="分享此刻的想法，支持 #话题# 与 @酷友"></textarea>
+        <div class="compose-media" id="composeMediaPreview"></div>
+        <label class="compose-upload"><input id="composeImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><i class="ph ph-image"></i><span>添加图片</span><small>最多 9 张，单张不超过 10MB</small></label>
+        <div class="compose-counter"><span id="composeStatus">内容将直接发布到当前连接的酷安账号</span><b><span id="composeCount">0</span>/10000</b></div>
+        <footer class="dialog-actions"><button class="btn secondary" type="button" data-close="composeDialog">取消</button><button class="btn primary" id="submitCompose" type="submit"><i class="ph ph-paper-plane-tilt"></i>发布</button></footer>
+      </form>
     </dialog>
 
     <dialog class="sheet-dialog rule-dialog" id="ruleDialog">

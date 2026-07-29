@@ -1,6 +1,6 @@
 # 酷窗 · 酷安 Web 工作台
 
-基于 [Coolapk-UWP](https://github.com/Coolapk-UWP/Coolapk-UWP) 的公开功能和 [Coolapk-API-Collect](https://github.com/Coolapk-UWP/Coolapk-API-Collect) 接口资料重新实现的响应式酷安 Web 客户端。首页、动态广场、应用与游戏、话题、统一搜索、用户主页、动态详情和评论都在站内完成；原有话题监控升级为其中的智能工作台模块。
+基于 [Coolapk-UWP](https://github.com/Coolapk-UWP/Coolapk-UWP) 和 [Coolapk-API-Collect](https://github.com/Coolapk-UWP/Coolapk-API-Collect) 接口资料重新实现的响应式酷安 Web 客户端。首页、动态广场、应用与游戏、话题、统一搜索、用户主页、动态详情、评论及账号态互动都在站内完成；原有话题监控升级为其中的智能工作台模块。
 
 服务每 5 分钟按发布时间增量采集监控话题，数据去重后写入长期归档。每个话题都可在关键词判断与 AI 判断中二选一；AI 可结合正文和图片给出 0–100% 的匹配度，达到阈值后进入飞书通知流程。
 
@@ -24,6 +24,12 @@ npm start
 - 热门话题目录、话题搜索、话题详情及一键加入监控
 - 帖子、话题、用户、应用统一搜索
 - 用户公开主页与本站历史归档动态
+- 酷安账号会话连接与校验，服务端加密字段遮罩
+- 点赞/取消点赞、关注/取消关注用户与话题、发布动态、回复动态与评论
+- 回复、@、获赞、新增关注、私信会话和未读数
+- 个人动态、文章、问答、收藏单、关注、粉丝、浏览历史与常去页面
+- 收藏单详情、内容列表、关注和点赞
+- 动态点赞用户、转发记录与编辑历史
 - 图片服务端代理、失败降级、全屏缩放与拖动画廊
 - 浅色 / 深色主题、可折叠桌面导航、移动底栏和完整响应式布局
 - 首页、快讯、问答、闲聊、开箱、摄影、教程、汽车、外设、视频、美化、好物、二手、评分、数码及应用排行等频道适配
@@ -40,8 +46,13 @@ $env:OPENAI_BASE_URL="https://api.openai.com/v1"
 $env:OPENAI_MODEL="gpt-5.6-luna"
 $env:FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/TOKEN"
 $env:FEISHU_WEBHOOK_SECRET="SIGNING_SECRET"
+$env:COOLAPK_UID="COOLAPK_UID"
+$env:COOLAPK_USERNAME="COOLAPK_USERNAME"
+$env:COOLAPK_TOKEN="COOLAPK_TOKEN"
 npm start
 ```
+
+酷安会话也可在“账号中心”导入。页面只显示 Token 掩码，完整会话仅存放在服务器 `data/settings.json`；环境变量的优先级更高。
 
 ## 使用流程
 
@@ -81,7 +92,7 @@ npm start
 
 以上运行时数据均被 `.gitignore` 排除。归档采用原子写入和串行落盘；在“系统设置 → 数据保留策略”中可设置帖子、AI 判断、用户资料保留时长和容量上限，也可立即执行清理。正式部署时请限制数据目录的操作系统访问权限，并通过反向代理启用 HTTPS 与访问控制。
 
-详细的分层设计、保留策略与数据流见 [docs/architecture.md](docs/architecture.md)。
+详细的分层设计、保留策略与数据流见 [docs/architecture.md](docs/architecture.md)，UWP 功能对应关系见 [docs/feature-matrix.md](docs/feature-matrix.md)。
 
 ## 接口
 
@@ -93,6 +104,15 @@ npm start
 - `GET /api/health`：进程健康状态
 - `GET /api/status`：抓取与 AI 运行状态
 - `GET|PUT /api/settings`：安全读取或更新集成设置
+- `GET|PUT|DELETE /api/account`、`POST /api/account/test`：酷安会话状态、连接、断开与校验
+- `GET /api/notifications`、`GET /api/notifications/counts`、`GET /api/messages`：通知、未读数与私信会话
+- `POST /api/feeds`：发布动态
+- `POST /api/feeds/:id/replies`、`POST /api/replies/:id/replies`：回复动态或评论
+- `POST /api/interactions/feeds/:id/like`、`POST /api/interactions/replies/:id/like`：点赞或取消点赞
+- `POST /api/interactions/users/:uid/follow`、`POST /api/interactions/topics/:tag/follow`：关注或取消关注
+- `GET /api/users/:uid/feeds`、`GET /api/users/:uid/collections`、`GET /api/users/:uid/connections`：用户完整内容
+- `GET /api/collections/:id`：收藏单详情、动态与应用
+- `GET /api/account/history`：浏览历史和常去内容
 - `POST /api/integrations/test-ai`：测试 AI 连接
 - `POST /api/integrations/test-feishu`：发送飞书测试消息
 - `GET /api/topics`：监控话题及最新动态

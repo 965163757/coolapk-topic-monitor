@@ -9,7 +9,7 @@ import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monito
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
 import { aiRuleInstructions, chunkItems, matchFeedKeywords, normalizeKeywords, normalizeRuleMode, requiresNotification } from "./lib/rules.js";
-import { appSummary, collectEntities, pageDecorations, uniqueSummaries, webChannelConfig, webChannels } from "./lib/web-client.js";
+import { appSummary, collectEntities, collectionSummary, messageSummary, notificationSummary, pageDecorations, sessionCookieHeader, uniqueSummaries, webChannelConfig, webChannels } from "./lib/web-client.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -38,6 +38,11 @@ const initialState = {
 };
 
 const defaultSettings = {
+  coolapk: {
+    uid: "",
+    username: "",
+    token: "",
+  },
   ai: {
     enabled: false,
     baseUrl: "https://api.openai.com/v1",
@@ -65,7 +70,15 @@ let archive = createArchive();
 let pollPromise = null;
 let analysisPromise = null;
 let persistenceQueue = Promise.resolve();
-const runtime = { lastAiRunAt: null, lastAiError: null, lastNotificationAt: null, lastCleanupAt: null };
+const runtime = {
+  lastAiRunAt: null,
+  lastAiError: null,
+  lastNotificationAt: null,
+  lastCleanupAt: null,
+  accountCheckedAt: null,
+  accountError: null,
+  accountValid: false,
+};
 const topicSearchCache = new Map();
 const aiImageCapabilityCache = new Map();
 
@@ -73,7 +86,19 @@ function md5(value) {
   return createHash("md5").update(value).digest("hex");
 }
 
-function coolapkHeaders() {
+function resolvedCoolapkSession() {
+  return {
+    uid: String(process.env.COOLAPK_UID || settings.coolapk?.uid || "").trim(),
+    username: String(process.env.COOLAPK_USERNAME || settings.coolapk?.username || "").trim(),
+    token: String(process.env.COOLAPK_TOKEN || settings.coolapk?.token || "").trim(),
+  };
+}
+
+function accountConfigured() {
+  return Boolean(sessionCookieHeader(resolvedCoolapkSession()));
+}
+
+function coolapkHeaders({ authenticated = false } = {}) {
   const rawDevice = `${DEVICE_BRAND};${DEVICE_MODEL};;;${Date.now()}${randomInt(1, 10001)};`;
   const deviceId = md5(rawDevice);
   const device = Buffer.from(`${deviceId}; ; ; ; ; ${DEVICE_BRAND}; ${DEVICE_MODEL}; `).toString("base64");
@@ -81,7 +106,7 @@ function coolapkHeaders() {
   const signature = md5(`${APP_ID}/${md5(APP_SECRET)}${deviceId}${timestamp}`);
   const token = `${signature}${deviceId}0x${timestamp.toString(16)}`;
 
-  return {
+  const headers = {
     Accept: "application/json",
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.65 NetType/5G Language/zh_CN",
     "X-Requested-With": "XMLHttpRequest",
@@ -94,12 +119,32 @@ function coolapkHeaders() {
     "X-App-Device": device,
     "X-App-Token": token,
   };
+  const cookie = sessionCookieHeader(resolvedCoolapkSession());
+  if (cookie) headers.Cookie = cookie;
+  if (authenticated && !cookie) {
+    const error = new Error("请先在账号中心连接酷安会话");
+    error.statusCode = 401;
+    throw error;
+  }
+  return headers;
 }
 
-async function coolapkGet(path, params = {}) {
+async function coolapkRequest(path, { method = "GET", params = {}, fields = null, authenticated = false } = {}) {
   const url = new URL(`${API_ROOT}${path}`);
-  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, String(value)));
-  const response = await fetch(url, { headers: coolapkHeaders(), signal: AbortSignal.timeout(20_000) });
+  Object.entries(params).forEach(([key, value]) => {
+    if (value != null && value !== "") url.searchParams.set(key, String(value));
+  });
+  const options = {
+    method,
+    headers: coolapkHeaders({ authenticated }),
+    signal: AbortSignal.timeout(20_000),
+  };
+  if (fields && method !== "GET") {
+    const form = new FormData();
+    Object.entries(fields).forEach(([key, value]) => form.append(key, String(value ?? "")));
+    options.body = form;
+  }
+  const response = await fetch(url, options);
   const text = await response.text();
   let payload;
   try {
@@ -107,9 +152,52 @@ async function coolapkGet(path, params = {}) {
   } catch {
     throw new Error(`酷安返回了非 JSON 响应（HTTP ${response.status}）`);
   }
-  if (!response.ok) throw new Error(`酷安请求失败（HTTP ${response.status}）`);
-  if (payload.status && !payload.data) throw new Error(payload.message || `酷安错误 ${payload.status}`);
+  if (!response.ok) {
+    const error = new Error(payload.message || `酷安请求失败（HTTP ${response.status}）`);
+    error.statusCode = response.status === 401 || response.status === 403 ? 401 : 502;
+    throw error;
+  }
+  if (!Object.hasOwn(payload, "data") && payload.message && Number(payload.error ?? payload.status ?? -1) !== 0) {
+    const error = new Error(payload.message);
+    error.statusCode = /登录|登陆|会话|token|权限/i.test(payload.message) ? 401 : 400;
+    throw error;
+  }
   return payload;
+}
+
+async function coolapkGet(path, params = {}, options = {}) {
+  return coolapkRequest(path, { method: "GET", params, ...options });
+}
+
+async function coolapkPost(path, params = {}, fields = null) {
+  return coolapkRequest(path, { method: "POST", params, fields, authenticated: true });
+}
+
+async function coolapkUploadImage(bytes, filename, contentType) {
+  const url = new URL(`${API_ROOT}/feed/uploadImage`);
+  url.searchParams.set("fieldName", "picFile");
+  url.searchParams.set("uploadDir", "feed");
+  const form = new FormData();
+  form.append("picFile", new Blob([bytes], { type: contentType }), filename);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: coolapkHeaders({ authenticated: true }),
+    body: form,
+    signal: AbortSignal.timeout(60_000),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload) {
+    const error = new Error(payload?.message || `图片上传失败（HTTP ${response.status}）`);
+    error.statusCode = response.status === 401 || response.status === 403 ? 401 : 502;
+    throw error;
+  }
+  if (!Object.hasOwn(payload, "data") && payload.message && Number(payload.error ?? payload.status ?? -1) !== 0) {
+    throw Object.assign(new Error(payload.message), { statusCode: 400 });
+  }
+  const value = payload.data;
+  const imageUrl = typeof value === "string" ? value : value?.url || value?.pic || "";
+  if (!imageUrl) throw Object.assign(new Error("酷安没有返回图片地址"), { statusCode: 502 });
+  return { url: String(imageUrl) };
 }
 
 function topicSummary(detail) {
@@ -127,6 +215,7 @@ function topicSummary(detail) {
     followers: Number(detail.follownum || detail.follow_num || 0),
     posts: Number(detail.commentnum || detail.feed_comment_num || 0),
     hot: Number(detail.hot_num || 0),
+    followed: Boolean(detail.userAction?.follow || detail.followed),
     url: detail.url || (source.type === "product" ? `/product/${detail.id}` : `/t/${encodeURIComponent(detail.title)}`),
   };
 }
@@ -179,6 +268,9 @@ function feedSummary(feed) {
     updatedAt: epochMs(feed.lastupdate || feed.last_update || feed.dateline || feed.create_time),
     device: feed.device_title || "",
     topic: feed.ttitle || feed.topic || feed.tname || "",
+    liked: Boolean(feed.userAction?.like || feed.liked),
+    favorited: Boolean(feed.userAction?.favorite || feed.userAction?.fav || feed.favorited),
+    followedAuthor: Boolean(feed.userAction?.follow || feed.followed),
     url: `https://www.coolapk.com/feed/${feed.id}`,
   };
 }
@@ -319,6 +411,7 @@ function publicUserSummary(user = {}) {
     following: Number(user.follow || user.follow_num || 0),
     feeds: Number(user.feed || user.feed_num || 0),
     likes: Number(user.be_like_num || 0),
+    followed: Boolean(user.userAction?.follow || user.followed),
     location: [user.province, user.city].filter(Boolean).join(" · "),
     url: user.url || (user.uid ? `/u/${user.uid}` : ""),
   };
@@ -337,6 +430,7 @@ function replySummary(reply) {
     createdAt: epochMs(reply.dateline),
     isAuthor: Boolean(reply.isFeedAuthor),
     replyTo: reply.rusername || "",
+    liked: Boolean(reply.userAction?.like || reply.liked),
     replies: (reply.replyRows || []).map(replySummary),
   };
 }
@@ -653,6 +747,164 @@ async function fetchUserProfile(uid, { refresh = false } = {}) {
   return { profile, localFeeds: archivedFeedsForUser(archive, profile.uid), cached: false };
 }
 
+function publicAccount() {
+  const session = resolvedCoolapkSession();
+  return {
+    configured: accountConfigured(),
+    valid: Boolean(runtime.accountValid && accountConfigured()),
+    uid: accountConfigured() ? session.uid : "",
+    username: accountConfigured() ? session.username : "",
+    tokenMasked: accountConfigured() ? maskSecret(session.token) : "",
+    source: process.env.COOLAPK_TOKEN ? "environment" : accountConfigured() ? "settings" : "none",
+    checkedAt: runtime.accountCheckedAt,
+    error: runtime.accountError,
+  };
+}
+
+async function checkCoolapkSession() {
+  const session = resolvedCoolapkSession();
+  if (!sessionCookieHeader(session)) {
+    const error = new Error("请填写完整的 uid、username 和 token");
+    error.statusCode = 400;
+    throw error;
+  }
+  try {
+    const payload = await coolapkGet("/account/checkLoginInfo", {}, { authenticated: true });
+    const data = payload.data || {};
+    runtime.accountCheckedAt = new Date().toISOString();
+    runtime.accountError = null;
+    runtime.accountValid = true;
+    const profileSource = data.userInfo || data.user || (typeof data === "object" ? data : {});
+    const profile = publicUserSummary({ uid: session.uid, username: session.username, ...profileSource });
+    if (profile.uid) archiveUser(archive, profile);
+    return { account: publicAccount(), profile };
+  } catch (error) {
+    runtime.accountCheckedAt = new Date().toISOString();
+    runtime.accountError = error.message;
+    runtime.accountValid = false;
+    throw error;
+  }
+}
+
+function cleanCredential(value, field, max = 2048) {
+  const text = String(value || "").trim();
+  if (!text) throw Object.assign(new Error(`${field} 不能为空`), { statusCode: 400 });
+  if (text.length > max || /[\r\n;]/.test(text)) {
+    throw Object.assign(new Error(`${field} 格式不正确`), { statusCode: 400 });
+  }
+  return text;
+}
+
+function actionResult(payload, extra = {}) {
+  const data = payload?.data ?? payload ?? {};
+  return {
+    ok: true,
+    count: Number(typeof data === "number" ? data : data?.count ?? data?.likenum ?? 0),
+    message: String(payload?.message || data?.message || "操作成功"),
+    ...extra,
+  };
+}
+
+function normalizedUploadUrls(pictures) {
+  return (Array.isArray(pictures) ? pictures : [])
+    .map((item) => String(item || "").trim())
+    .filter((item) => /^https?:\/\/[^ \r\n]+$/i.test(item))
+    .slice(0, 9);
+}
+
+async function createFeed(message, pictures = []) {
+  const content = String(message || "").trim();
+  if (!content) throw Object.assign(new Error("请输入动态内容"), { statusCode: 400 });
+  if (content.length > 10_000) throw Object.assign(new Error("动态内容过长"), { statusCode: 400 });
+  const payload = await coolapkPost("/feed/createFeed", {}, {
+    message: content,
+    type: "feed",
+    is_html_article: "0",
+    pic: normalizedUploadUrls(pictures).join(","),
+  });
+  return actionResult(payload, { feed: payload.data && typeof payload.data === "object" ? feedSummary(payload.data) : null });
+}
+
+async function createReply(id, type, message, pictures = []) {
+  const cleanId = String(id || "").trim();
+  if (!/^\d{1,20}$/.test(cleanId)) throw Object.assign(new Error("回复目标 ID 无效"), { statusCode: 400 });
+  const content = String(message || "").trim();
+  if (!content) throw Object.assign(new Error("请输入回复内容"), { statusCode: 400 });
+  if (content.length > 5_000) throw Object.assign(new Error("回复内容过长"), { statusCode: 400 });
+  const payload = await coolapkPost("/feed/reply", { id: cleanId, type }, { message: content, pic: normalizedUploadUrls(pictures).join(",") });
+  return actionResult(payload, { reply: payload.data && typeof payload.data === "object" ? replySummary(payload.data) : null });
+}
+
+async function fetchNotificationPage(type, page = 1) {
+  const allowed = new Set(["list", "atMeList", "atCommentMeList", "feedLikeList", "contactsFollowList"]);
+  if (!allowed.has(type)) throw Object.assign(new Error("不支持的通知分类"), { statusCode: 400 });
+  const payload = await coolapkGet(`/notification/${type}`, { page }, { authenticated: true });
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  return {
+    type,
+    page,
+    notifications: rows.map((item) => item.entityType === "feed"
+      ? { ...notificationSummary(item, type), title: `${item.username || "酷友"} @ 了你`, message: item.message || "", feedId: String(item.id || ""), feed: feedSummary(item) }
+      : notificationSummary(item, type)),
+  };
+}
+
+async function fetchUserFeeds(uid, branch = "feed", page = 1) {
+  const cleanUid = String(uid || "").trim();
+  const allowed = new Set(["feed", "htmlFeed", "questionAndAnswer"]);
+  if (!/^\d{1,20}$/.test(cleanUid)) throw Object.assign(new Error("用户 UID 无效"), { statusCode: 400 });
+  if (!allowed.has(branch)) throw Object.assign(new Error("不支持的用户内容分类"), { statusCode: 400 });
+  const payload = await coolapkGet(`/user/${branch}List`, { uid: cleanUid, page, isIncludeTop: 1 }, { authenticated: true });
+  return { uid: cleanUid, branch, page, feeds: feedItems(payload.data).map(feedSummary) };
+}
+
+async function fetchCollections(uid, page = 1) {
+  const cleanUid = String(uid || "").trim();
+  if (!/^\d{1,20}$/.test(cleanUid)) throw Object.assign(new Error("用户 UID 无效"), { statusCode: 400 });
+  const payload = await coolapkGet("/collection/list", { uid: cleanUid, page }, { authenticated: true });
+  const rows = collectEntities(payload.data, (item) => item?.entityType === "collection" || (item?.id && (item?.item_num != null || item?.cover_pic)));
+  return { uid: cleanUid, page, collections: uniqueSummaries(rows.map(collectionSummary)) };
+}
+
+async function fetchCollectionDetail(id, page = 1) {
+  const cleanId = String(id || "").trim();
+  if (!/^\d{1,20}$/.test(cleanId)) throw Object.assign(new Error("收藏单 ID 无效"), { statusCode: 400 });
+  const [detailPayload, itemsPayload] = await Promise.all([
+    coolapkGet("/collection/detail", { id: cleanId }, { authenticated: true }),
+    coolapkGet("/collection/itemList", { id: cleanId, page }, { authenticated: true }),
+  ]);
+  const raw = itemsPayload.data || [];
+  return {
+    collection: collectionSummary(detailPayload.data || { id: cleanId }),
+    feeds: feedItems(raw).map(feedSummary),
+    apps: uniqueSummaries(appItems(raw).map(appSummary)),
+    page,
+  };
+}
+
+async function fetchUserList(uid, type = "followList", page = 1) {
+  const allowed = new Set(["followList", "fansList"]);
+  if (!allowed.has(type)) throw Object.assign(new Error("不支持的用户关系分类"), { statusCode: 400 });
+  const payload = await coolapkGet(`/user/${type}`, { uid, page, isIncludeTop: 1 }, { authenticated: true });
+  const users = collectEntities(payload.data, (item) => item?.entityType === "user" || item?.uid || item?.userInfo?.uid)
+    .map((item) => publicUserSummary(item.userInfo || item))
+    .filter((item) => item.uid);
+  return { uid: String(uid), type, page, users: uniqueSummaries(users, "uid") };
+}
+
+async function fetchAccountHistory(type = "history", page = 1) {
+  const path = type === "recent" ? "/user/recentHistoryList" : "/user/hitHistoryList";
+  const payload = await coolapkGet(path, { page }, { authenticated: true });
+  const raw = payload.data || [];
+  return {
+    type,
+    page,
+    feeds: feedItems(raw).map(feedSummary),
+    apps: uniqueSummaries(appItems(raw).map(appSummary)),
+    topics: uniqueSummaries(publicTopicItems(raw), "sourceKey"),
+  };
+}
+
 function resolvedAiSettings() {
   return {
     ...settings.ai,
@@ -696,6 +948,7 @@ function publicSettings() {
   const ai = resolvedAiSettings();
   const feishu = resolvedFeishuSettings();
   return {
+    coolapk: publicAccount(),
     ai: {
       enabled: Boolean(settings.ai.enabled),
       baseUrl: ai.baseUrl,
@@ -717,6 +970,7 @@ function publicSettings() {
       configured: Boolean(feishu.webhookUrl),
       webhookMasked: maskSecret(feishu.webhookUrl),
       secretConfigured: Boolean(feishu.secret),
+      secretMasked: maskSecret(feishu.secret),
       webhookSource: process.env.FEISHU_WEBHOOK_URL ? "environment" : feishu.webhookUrl ? "settings" : "none",
     },
     runtime: {
@@ -1286,6 +1540,7 @@ async function loadSettings() {
     settings = {
       ...structuredClone(defaultSettings),
       ...stored,
+      coolapk: { ...defaultSettings.coolapk, ...(stored.coolapk || {}) },
       ai: { ...defaultSettings.ai, ...(stored.ai || {}) },
       feishu: { ...defaultSettings.feishu, ...(stored.feishu || {}) },
       processedFeedIds: stored.processedFeedIds && typeof stored.processedFeedIds === "object" ? stored.processedFeedIds : {},
@@ -1463,11 +1718,11 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = 32_000) {
   let body = "";
   for await (const chunk of request) {
     body += chunk;
-    if (body.length > 32_000) throw new Error("请求内容过大");
+    if (body.length > maxBytes) throw Object.assign(new Error("请求内容过大"), { statusCode: 413 });
   }
   return body ? JSON.parse(body) : {};
 }
@@ -1552,7 +1807,116 @@ async function handleApi(request, response, url) {
       ai: publicSettings().runtime,
       archive: archiveSummary(archive),
       retention: normalizeRetention(settings.retention),
+      account: publicAccount(),
     });
+  }
+  if (request.method === "GET" && url.pathname === "/api/account") {
+    return sendJson(response, 200, publicAccount());
+  }
+  if (request.method === "PUT" && url.pathname === "/api/account") {
+    if (process.env.COOLAPK_TOKEN) return sendJson(response, 409, { error: "当前酷安会话由服务器环境变量管理" });
+    const body = await readJson(request);
+    const previous = { ...settings.coolapk };
+    settings.coolapk = {
+      uid: cleanCredential(body.uid, "UID", 20),
+      username: cleanCredential(body.username, "用户名", 100),
+      token: cleanCredential(body.token, "Token"),
+    };
+    try {
+      const result = await checkCoolapkSession();
+      await Promise.all([saveSettings(), saveArchive()]);
+      appendArchiveEvent(archive, { type: "account_connected", level: "success", message: `已连接酷安账号：${settings.coolapk.username}` });
+      await saveArchive();
+      return sendJson(response, 200, result);
+    } catch (error) {
+      settings.coolapk = previous;
+      throw error;
+    }
+  }
+  if (request.method === "DELETE" && url.pathname === "/api/account") {
+    if (process.env.COOLAPK_TOKEN) return sendJson(response, 409, { error: "当前酷安会话由服务器环境变量管理" });
+    settings.coolapk = { ...defaultSettings.coolapk };
+    runtime.accountCheckedAt = new Date().toISOString();
+    runtime.accountValid = false;
+    runtime.accountError = null;
+    await saveSettings();
+    return sendJson(response, 200, { account: publicAccount() });
+  }
+  if (request.method === "POST" && url.pathname === "/api/account/test") {
+    return sendJson(response, 200, await checkCoolapkSession());
+  }
+  if (request.method === "GET" && url.pathname === "/api/notifications/counts") {
+    const payload = await coolapkGet("/notification/checkCount", {}, { authenticated: true });
+    return sendJson(response, 200, { counts: payload.data || {} });
+  }
+  if (request.method === "GET" && url.pathname === "/api/notifications") {
+    const type = String(url.searchParams.get("type") || "list");
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchNotificationPage(type, page));
+  }
+  if (request.method === "GET" && url.pathname === "/api/messages") {
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    const payload = await coolapkGet("/message/list", { page }, { authenticated: true });
+    return sendJson(response, 200, { page, messages: (Array.isArray(payload.data) ? payload.data : []).map(messageSummary) });
+  }
+  if (request.method === "GET" && url.pathname === "/api/account/history") {
+    const type = url.searchParams.get("type") === "recent" ? "recent" : "history";
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchAccountHistory(type, page));
+  }
+  if (request.method === "POST" && url.pathname === "/api/feeds") {
+    const body = await readJson(request);
+    return sendJson(response, 201, await createFeed(body.message, body.pictures));
+  }
+  if (request.method === "POST" && url.pathname === "/api/account/upload-image") {
+    const body = await readJson(request, 16_000_000);
+    const match = String(body.dataUrl || "").match(/^data:(image\/(?:png|jpe?g|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i);
+    if (!match) return sendJson(response, 400, { error: "只支持 PNG、JPEG、WebP 或 GIF 图片" });
+    const bytes = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+    if (!bytes.length || bytes.length > 10 * 1024 * 1024) return sendJson(response, 413, { error: "单张图片需小于 10MB" });
+    const extension = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif" }[match[1].toLowerCase()] || "png";
+    const basename = String(body.filename || `image.${extension}`).replace(/[^a-zA-Z0-9._-]/g, "_").slice(-120);
+    return sendJson(response, 201, await coolapkUploadImage(bytes, basename || `image.${extension}`, match[1].toLowerCase()));
+  }
+  const feedLikeMatch = url.pathname.match(/^\/api\/interactions\/feeds\/(\d+)\/like$/);
+  if (feedLikeMatch && request.method === "POST") {
+    const body = await readJson(request);
+    const liked = body.liked !== false;
+    const payload = await coolapkPost(`/feed/${liked ? "like" : "unlike"}`, { id: feedLikeMatch[1] });
+    return sendJson(response, 200, actionResult(payload, { liked }));
+  }
+  const replyLikeMatch = url.pathname.match(/^\/api\/interactions\/replies\/(\d+)\/like$/);
+  if (replyLikeMatch && request.method === "POST") {
+    const body = await readJson(request);
+    const liked = body.liked !== false;
+    const payload = await coolapkPost(`/feed/${liked ? "likeReply" : "unlikeReply"}`, { id: replyLikeMatch[1] });
+    return sendJson(response, 200, actionResult(payload, { liked }));
+  }
+  const userFollowMatch = url.pathname.match(/^\/api\/interactions\/users\/(\d+)\/follow$/);
+  if (userFollowMatch && request.method === "POST") {
+    const body = await readJson(request);
+    const followed = body.followed !== false;
+    const payload = await coolapkPost(`/user/${followed ? "follow" : "unfollow"}`, { uid: userFollowMatch[1] });
+    return sendJson(response, 200, actionResult(payload, { followed }));
+  }
+  const topicFollowMatch = url.pathname.match(/^\/api\/interactions\/topics\/(.+)\/follow$/);
+  if (topicFollowMatch && request.method === "POST") {
+    const body = await readJson(request);
+    const followed = body.followed !== false;
+    const tag = decodeURIComponent(topicFollowMatch[1]);
+    const payload = await coolapkPost(`/feed/${followed ? "followTag" : "unFollowTag"}`, { tag });
+    return sendJson(response, 200, actionResult(payload, { followed }));
+  }
+  const collectionActionMatch = url.pathname.match(/^\/api\/interactions\/collections\/(\d+)\/(follow|like)$/);
+  if (collectionActionMatch && request.method === "POST") {
+    const body = await readJson(request);
+    const enabled = body.enabled !== false;
+    const action = collectionActionMatch[2];
+    const route = action === "follow"
+      ? enabled ? "follow" : "unFollow"
+      : enabled ? "like" : "unLike";
+    const payload = await coolapkPost(`/collection/${route}`, {}, { id: collectionActionMatch[1] });
+    return sendJson(response, 200, actionResult(payload, { enabled, action }));
   }
   if (request.method === "GET" && url.pathname === "/api/web/channels") {
     return sendJson(response, 200, { channels: webChannels() });
@@ -1724,6 +2088,28 @@ async function handleApi(request, response, url) {
     const refresh = url.searchParams.get("refresh") === "1";
     return sendJson(response, 200, await fetchUserProfile(userMatch[1], { refresh }));
   }
+  const userFeedsMatch = url.pathname.match(/^\/api\/users\/(\d+)\/feeds$/);
+  if (userFeedsMatch && request.method === "GET") {
+    const branch = String(url.searchParams.get("branch") || "feed");
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchUserFeeds(userFeedsMatch[1], branch, page));
+  }
+  const userCollectionsMatch = url.pathname.match(/^\/api\/users\/(\d+)\/collections$/);
+  if (userCollectionsMatch && request.method === "GET") {
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchCollections(userCollectionsMatch[1], page));
+  }
+  const userConnectionsMatch = url.pathname.match(/^\/api\/users\/(\d+)\/connections$/);
+  if (userConnectionsMatch && request.method === "GET") {
+    const type = url.searchParams.get("type") === "fansList" ? "fansList" : "followList";
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchUserList(userConnectionsMatch[1], type, page));
+  }
+  const collectionMatch = url.pathname.match(/^\/api\/collections\/(\d+)$/);
+  if (collectionMatch && request.method === "GET") {
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    return sendJson(response, 200, await fetchCollectionDetail(collectionMatch[1], page));
+  }
   if (request.method === "GET" && url.pathname === "/api/topics") {
     return sendJson(response, 200, { topics: state.topics.map(publicTopicSnapshot) });
   }
@@ -1800,6 +2186,40 @@ async function handleApi(request, response, url) {
     }
     return sendJson(response, 200, { replies, page });
   }
+  if (repliesMatch && request.method === "POST") {
+    const body = await readJson(request);
+    return sendJson(response, 201, await createReply(repliesMatch[1], "feed", body.message, body.pictures));
+  }
+  const replyReplyMatch = url.pathname.match(/^\/api\/replies\/(\d+)\/replies$/);
+  if (replyReplyMatch && request.method === "POST") {
+    const body = await readJson(request);
+    return sendJson(response, 201, await createReply(replyReplyMatch[1], "reply", body.message, body.pictures));
+  }
+  const feedAuxMatch = url.pathname.match(/^\/api\/feeds\/(\d+)\/(likes|forwards|history)$/);
+  if (feedAuxMatch && request.method === "GET") {
+    const [, id, type] = feedAuxMatch;
+    const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
+    const config = {
+      likes: ["/feed/likeList", { id, listType: "lastupdate_desc", page }],
+      forwards: ["/feed/forwardList", { id, type: "feed", page }],
+      history: ["/feed/changeHistoryList", { id }],
+    }[type];
+    const payload = await coolapkGet(config[0], config[1], { authenticated: true });
+    const rows = Array.isArray(payload.data) ? payload.data : [];
+    return sendJson(response, 200, {
+      id,
+      type,
+      page,
+      feeds: feedItems(rows).map(feedSummary),
+      users: collectEntities(rows, (item) => item?.entityType === "user" || item?.uid || item?.userInfo?.uid)
+        .map((item) => publicUserSummary(item.userInfo || item)),
+      items: rows.map((item) => ({
+        id: String(item.id || item.entityId || ""),
+        message: String(item.message || item.note || item.title || ""),
+        createdAt: epochMs(item.dateline || item.create_time),
+      })),
+    });
+  }
   const feedMatch = url.pathname.match(/^\/api\/feeds\/(\d+)$/);
   if (feedMatch && request.method === "GET") {
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
@@ -1875,7 +2295,7 @@ const server = createServer(async (request, response) => {
     if (!(await serveStatic(url.pathname, response))) sendJson(response, 404, { error: "页面不存在" });
   } catch (error) {
     console.error(error);
-    sendJson(response, 500, { error: error.message || "服务器错误" });
+    sendJson(response, Number(error.statusCode) || 500, { error: error.message || "服务器错误" });
   }
 });
 
