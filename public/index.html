@@ -165,8 +165,24 @@
     </dialog>
 
     <dialog class="lightbox" id="lightbox">
-      <header><span id="lightboxCaption">查看图片</span><div><button id="zoomOut" type="button" aria-label="缩小图片"><i class="ph ph-minus"></i></button><button id="zoomReset" type="button" aria-label="重置图片缩放">100%</button><button id="zoomIn" type="button" aria-label="放大图片"><i class="ph ph-plus"></i></button><button type="button" data-close="lightbox" aria-label="关闭图片"><i class="ph ph-x"></i></button></div></header>
-      <div class="lightbox-stage" id="lightboxStage"><img id="lightboxImage" alt="放大的帖子图片" /></div>
+      <header class="lightbox-header">
+        <div class="lightbox-title"><strong id="lightboxCaption">查看图片</strong><small id="lightboxCounter" aria-live="polite">1 / 1</small></div>
+        <div class="lightbox-tools">
+          <button id="zoomOut" type="button" aria-label="缩小图片"><i class="ph ph-minus"></i></button>
+          <button id="zoomReset" type="button" aria-label="重置为适合屏幕">适合屏幕</button>
+          <button id="zoomIn" type="button" aria-label="放大图片"><i class="ph ph-plus"></i></button>
+          <a id="lightboxOriginal" href="#" target="_blank" rel="noreferrer" aria-label="在新窗口查看原图"><i class="ph ph-arrow-square-out"></i><span>原图</span></a>
+          <button type="button" data-close="lightbox" aria-label="关闭图片"><i class="ph ph-x"></i></button>
+        </div>
+      </header>
+      <button class="lightbox-nav previous" id="lightboxPrevious" type="button" aria-label="上一张图片"><i class="ph ph-caret-left"></i></button>
+      <div class="lightbox-stage" id="lightboxStage">
+        <div class="lightbox-loading" id="lightboxLoading"><i class="ph ph-circle-notch"></i><span>正在加载原图</span></div>
+        <img id="lightboxImage" alt="放大的帖子图片" draggable="false" />
+        <div class="lightbox-error" id="lightboxError" hidden><i class="ph ph-image-broken"></i><strong>图片加载失败</strong><button type="button" id="lightboxRetry">重新加载</button></div>
+      </div>
+      <button class="lightbox-nav next" id="lightboxNext" type="button" aria-label="下一张图片"><i class="ph ph-caret-right"></i></button>
+      <footer class="lightbox-footer"><div class="lightbox-thumbs" id="lightboxThumbs"></div><small>滚轮缩放 · 双击放大 · 拖动查看</small></footer>
     </dialog>
 
     <div class="toast-region" id="toastRegion" aria-live="polite"></div>

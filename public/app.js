@@ -29,6 +29,7 @@ const state = {
   account: null,
   notificationCounts: {},
   compose: { type: "feed", id: "", title: "", files: [], previewUrls: [] },
+  imageGroups: new Map(),
   evaluations: [],
   evaluationStats: { total: 0, matched: 0, notified: 0, errors: 0 },
   channelCache: new Map(),
@@ -48,7 +49,21 @@ const state = {
   feedReplyPage: 1,
   activeRuleTopic: "",
   carouselTimer: null,
-  lightbox: { zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0 },
+  lightbox: {
+    sources: [],
+    index: 0,
+    caption: "查看图片",
+    zoom: 1,
+    x: 0,
+    y: 0,
+    dragging: false,
+    startX: 0,
+    startY: 0,
+    swipeStart: null,
+    pointers: new Map(),
+    pinchDistance: 0,
+    pinchZoom: 1,
+  },
 };
 
 const numberFormat = new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
@@ -204,11 +219,13 @@ function evaluationFor(feed) {
 function feedImageMarkup(feed) {
   const pictures = [...new Set((feed.pictures || []).filter(Boolean))];
   if (!pictures.length) return "";
+  const group = `feed:${String(feed.id || displayFeedTitle(feed))}`;
+  state.imageGroups.set(group, pictures);
   const visible = pictures.slice(0, 3);
   const className = visible.length === 1 ? "one" : visible.length === 2 ? "two" : "three";
   return `<div class="feed-images ${className}">${visible.map((picture, index) => {
     const more = index === 2 && pictures.length > 3 ? `+${pictures.length - 3}` : "";
-    return `<button class="${more ? "more" : ""}" type="button" data-image="${escapeHtml(picture)}" data-caption="${escapeHtml(displayFeedTitle(feed))}" aria-label="放大帖子图片 ${index + 1}${more ? `，另有 ${pictures.length - 3} 张` : ""}" ${more ? `data-more="${more}"` : ""}><img src="${escapeHtml(imageUrl(picture))}" alt="帖子图片 ${index + 1}" loading="lazy" /></button>`;
+    return `<button class="${more ? "more" : ""}" type="button" data-image="${escapeHtml(picture)}" data-image-group="${escapeHtml(group)}" data-image-index="${index}" data-caption="${escapeHtml(displayFeedTitle(feed))}" aria-label="放大帖子图片 ${index + 1}${more ? `，另有 ${pictures.length - 3} 张` : ""}" ${more ? `data-more="${more}"` : ""}><img src="${escapeHtml(imageUrl(picture))}" alt="帖子图片 ${index + 1}" loading="lazy" /></button>`;
   }).join("")}</div>`;
 }
 
@@ -351,6 +368,7 @@ function parseRoute() {
 
 async function route({ force = false } = {}) {
   closeAllDialogs();
+  state.imageGroups.clear();
   const parsed = parseRoute();
   state.route = parsed.route;
   state.routeParams = parsed.params;
@@ -932,9 +950,11 @@ async function openApp(id) {
   try {
     const payload = await api(`/api/apps/${encodeURIComponent(id)}`);
     const app = payload.app;
+    const screenshotGroup = `app:${app.id}`;
+    state.imageGroups.set(screenshotGroup, app.screenshots || []);
     const webUrl = `https://www.coolapk.com/apk/${encodeURIComponent(app.packageName || app.id)}`;
     const appUrl = `coolmarket://apk/${encodeURIComponent(app.packageName || app.id)}`;
-    appDialogBody.innerHTML = `<section class="app-detail-hero">${app.logo ? `<img src="${escapeHtml(imageUrl(app.logo))}" alt="${escapeHtml(app.title)}" />` : `<span class="app-logo-placeholder"><i class="ph ph-app-window"></i></span>`}<div><h2>${escapeHtml(app.title)}</h2><p>${escapeHtml(app.subtitle || app.packageName)}</p><div class="app-detail-stats"><span><strong>${Number(app.score || 0).toFixed(1)}</strong><small>酷友评分</small></span><span><strong>${escapeHtml(app.version || "—")}</strong><small>最新版本</small></span><span><strong>${escapeHtml(app.size || "—")}</strong><small>安装包</small></span><span><strong>${compactNumber(app.downloads)}</strong><small>下载</small></span></div><div class="detail-actions"><a class="btn primary" href="${escapeHtml(appUrl)}"><i class="ph ph-device-mobile"></i>酷安 App 打开</a><a class="btn secondary" href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></div></div></section>${app.packageName ? `<section class="detail-facts"><span><b>包名</b>${escapeHtml(app.packageName)}</span><span><b>开发者</b>${escapeHtml(app.developer || "—")}</span><span><b>分类</b>${escapeHtml(app.category || "—")}</span><span><b>更新时间</b>${escapeHtml(app.updatedAt ? formatDate(app.updatedAt) : "—")}</span></section>` : ""}${app.description ? `<section class="detail-section"><h3>应用介绍</h3><p>${escapeHtml(stripHtml(app.description))}</p></section>` : ""}${app.changelog ? `<section class="detail-section"><h3>更新说明</h3><p>${escapeHtml(stripHtml(app.changelog))}</p></section>` : ""}${app.screenshots?.length ? `<section class="detail-section"><h3>应用截图</h3><div class="screenshots">${app.screenshots.map((picture, index) => `<button type="button" data-image="${escapeHtml(picture)}" data-caption="${escapeHtml(app.title)}" aria-label="放大应用截图 ${index + 1}"><img src="${escapeHtml(imageUrl(picture))}" alt="应用截图 ${index + 1}" loading="lazy" /></button>`).join("")}</div></section>` : ""}<section class="detail-section"><h3>相关动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
+    appDialogBody.innerHTML = `<section class="app-detail-hero">${app.logo ? `<img src="${escapeHtml(imageUrl(app.logo))}" alt="${escapeHtml(app.title)}" />` : `<span class="app-logo-placeholder"><i class="ph ph-app-window"></i></span>`}<div><h2>${escapeHtml(app.title)}</h2><p>${escapeHtml(app.subtitle || app.packageName)}</p><div class="app-detail-stats"><span><strong>${Number(app.score || 0).toFixed(1)}</strong><small>酷友评分</small></span><span><strong>${escapeHtml(app.version || "—")}</strong><small>最新版本</small></span><span><strong>${escapeHtml(app.size || "—")}</strong><small>安装包</small></span><span><strong>${compactNumber(app.downloads)}</strong><small>下载</small></span></div><div class="detail-actions"><a class="btn primary" href="${escapeHtml(appUrl)}"><i class="ph ph-device-mobile"></i>酷安 App 打开</a><a class="btn secondary" href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></div></div></section>${app.packageName ? `<section class="detail-facts"><span><b>包名</b>${escapeHtml(app.packageName)}</span><span><b>开发者</b>${escapeHtml(app.developer || "—")}</span><span><b>分类</b>${escapeHtml(app.category || "—")}</span><span><b>更新时间</b>${escapeHtml(app.updatedAt ? formatDate(app.updatedAt) : "—")}</span></section>` : ""}${app.description ? `<section class="detail-section"><h3>应用介绍</h3><p>${escapeHtml(stripHtml(app.description))}</p></section>` : ""}${app.changelog ? `<section class="detail-section"><h3>更新说明</h3><p>${escapeHtml(stripHtml(app.changelog))}</p></section>` : ""}${app.screenshots?.length ? `<section class="detail-section"><h3>应用截图</h3><div class="screenshots">${app.screenshots.map((picture, index) => `<button type="button" data-image="${escapeHtml(picture)}" data-image-group="${escapeHtml(screenshotGroup)}" data-image-index="${index}" data-caption="${escapeHtml(app.title)}" aria-label="放大应用截图 ${index + 1}"><img src="${escapeHtml(imageUrl(picture))}" alt="应用截图 ${index + 1}" loading="lazy" /></button>`).join("")}</div></section>` : ""}<section class="detail-section"><h3>相关动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
   } catch (error) {
     appDialogBody.innerHTML = emptyState("warning-circle", "应用详情加载失败", error.message);
   }
@@ -1317,29 +1337,122 @@ async function removeTopic(tag) {
   }
 }
 
-function openLightbox(url, caption = "查看图片") {
-  const src = imageUrl(url);
-  if (!src) return;
-  state.lightbox = { zoom: 1, x: 0, y: 0, dragging: false, startX: 0, startY: 0 };
+function lightboxGallery(url, trigger) {
+  const group = trigger?.dataset.imageGroup;
+  const registered = group ? state.imageGroups.get(group) : null;
+  const container = trigger?.closest(".feed-images, .screenshots, .comment");
+  const discovered = container ? $$("[data-image]", container).map((item) => item.dataset.image) : [];
+  const values = registered?.length ? registered : discovered.length ? discovered : [url];
+  return [...new Set(values.map(String).filter((item) => imageUrl(item)))];
+}
+
+function resetLightboxTransform() {
+  state.lightbox.zoom = 1;
+  state.lightbox.x = 0;
+  state.lightbox.y = 0;
+  state.lightbox.dragging = false;
+  state.lightbox.swipeStart = null;
+  state.lightbox.pointers = new Map();
+  state.lightbox.pinchDistance = 0;
+  state.lightbox.pinchZoom = 1;
+  lightboxStage.classList.remove("dragging");
+}
+
+function renderLightboxThumbs() {
+  const item = state.lightbox;
+  $("#lightboxThumbs").innerHTML = item.sources.length > 1
+    ? item.sources.map((source, index) => `<button class="${index === item.index ? "active" : ""}" type="button" data-lightbox-index="${index}" aria-label="查看第 ${index + 1} 张图片"><img src="${escapeHtml(imageUrl(source))}" alt="" loading="lazy" /></button>`).join("")
+    : "";
+  $(".lightbox-footer", lightbox).classList.toggle("single", item.sources.length <= 1);
+  requestAnimationFrame(() => $("[data-lightbox-index].active", $("#lightboxThumbs"))?.scrollIntoView({ block: "nearest", inline: "center" }));
+}
+
+function loadLightboxImage(index = state.lightbox.index) {
+  const item = state.lightbox;
+  if (!item.sources.length) return;
+  item.index = (Number(index) + item.sources.length) % item.sources.length;
+  resetLightboxTransform();
+  const original = item.sources[item.index];
+  const src = imageUrl(original);
+  $("#lightboxCounter").textContent = `${item.index + 1} / ${item.sources.length}`;
+  $("#lightboxOriginal").href = safeUrl(original) || src;
+  $("#lightboxPrevious").disabled = item.sources.length <= 1;
+  $("#lightboxNext").disabled = item.sources.length <= 1;
+  $("#lightboxLoading").hidden = false;
+  $("#lightboxError").hidden = true;
+  lightboxImage.classList.remove("ready");
+  lightboxImage.style.visibility = "visible";
+  lightboxImage.alt = `${item.caption}，第 ${item.index + 1} 张`;
   lightboxImage.src = src;
-  $("#lightboxCaption").textContent = caption;
+  renderLightboxThumbs();
   updateLightbox();
+}
+
+function openLightbox(url, caption = "查看图片", trigger = null) {
+  const sources = lightboxGallery(url, trigger);
+  if (!sources.length) return;
+  const requestedIndex = Number(trigger?.dataset.imageIndex);
+  const matchedIndex = sources.indexOf(String(url));
+  state.lightbox = {
+    sources,
+    index: Number.isInteger(requestedIndex) && requestedIndex >= 0 ? requestedIndex : Math.max(0, matchedIndex),
+    caption: caption || "查看图片",
+    zoom: 1,
+    x: 0,
+    y: 0,
+    dragging: false,
+    startX: 0,
+    startY: 0,
+    swipeStart: null,
+    pointers: new Map(),
+    pinchDistance: 0,
+    pinchZoom: 1,
+  };
+  $("#lightboxCaption").textContent = state.lightbox.caption;
   showDialog(lightbox);
+  loadLightboxImage(state.lightbox.index);
+}
+
+function clampLightboxPan() {
+  const item = state.lightbox;
+  if (item.zoom <= 1) {
+    item.x = 0;
+    item.y = 0;
+    return;
+  }
+  const maxX = Math.max(0, (lightboxImage.clientWidth * item.zoom - lightboxStage.clientWidth) / 2 + 28);
+  const maxY = Math.max(0, (lightboxImage.clientHeight * item.zoom - lightboxStage.clientHeight) / 2 + 28);
+  item.x = Math.max(-maxX, Math.min(maxX, item.x));
+  item.y = Math.max(-maxY, Math.min(maxY, item.y));
 }
 
 function updateLightbox() {
   const item = state.lightbox;
-  lightboxImage.style.transform = `translate(${item.x}px, ${item.y}px) scale(${item.zoom})`;
-  $("#zoomReset").textContent = `${Math.round(item.zoom * 100)}%`;
+  clampLightboxPan();
+  lightboxImage.style.transform = `translate3d(${item.x}px, ${item.y}px, 0) scale(${item.zoom})`;
+  $("#zoomReset").textContent = item.zoom === 1 ? "适合屏幕" : `${Math.round(item.zoom * 100)}%`;
+  $("#zoomOut").disabled = item.zoom <= 1;
+  $("#zoomIn").disabled = item.zoom >= 5;
+  lightboxStage.classList.toggle("zoomed", item.zoom > 1);
 }
 
 function setZoom(value) {
-  state.lightbox.zoom = Math.max(.25, Math.min(5, value));
+  state.lightbox.zoom = Math.max(1, Math.min(5, Number(value) || 1));
   if (state.lightbox.zoom === 1) {
     state.lightbox.x = 0;
     state.lightbox.y = 0;
   }
   updateLightbox();
+}
+
+function stepLightbox(direction) {
+  if (state.lightbox.sources.length <= 1) return;
+  loadLightboxImage(state.lightbox.index + direction);
+}
+
+function pointerDistance(points) {
+  const [first, second] = [...points.values()];
+  return first && second ? Math.hypot(second.x - first.x, second.y - first.y) : 0;
 }
 
 function handleSmartLink(value) {
@@ -1382,7 +1495,8 @@ document.addEventListener("click", async (event) => {
   if (target.matches("[data-user]")) openUser(target.dataset.user);
   if (target.matches("[data-user-section]")) loadUserSection(target);
   if (target.matches("[data-collection]")) openCollection(target.dataset.collection);
-  if (target.matches("[data-image]")) openLightbox(target.dataset.image, target.dataset.caption);
+  if (target.matches("[data-image]")) openLightbox(target.dataset.image, target.dataset.caption, target);
+  if (target.matches("[data-lightbox-index]")) loadLightboxImage(Number(target.dataset.lightboxIndex));
   if (target.matches("[data-share-feed]")) shareFeed(target);
   if (target.matches("[data-account-required]")) routeToAccount();
   if (target.matches("[data-compose-insert]")) insertComposeToken(target.dataset.composeInsert);
@@ -1715,28 +1829,101 @@ $("#analyzeRule").addEventListener("click", analyzeRule);
 $("#zoomIn").addEventListener("click", () => setZoom(state.lightbox.zoom + .25));
 $("#zoomOut").addEventListener("click", () => setZoom(state.lightbox.zoom - .25));
 $("#zoomReset").addEventListener("click", () => setZoom(1));
+$("#lightboxPrevious").addEventListener("click", () => stepLightbox(-1));
+$("#lightboxNext").addEventListener("click", () => stepLightbox(1));
+$("#lightboxRetry").addEventListener("click", () => {
+  const src = lightboxImage.src;
+  lightboxImage.src = "";
+  requestAnimationFrame(() => {
+    $("#lightboxLoading").hidden = false;
+    $("#lightboxError").hidden = true;
+    lightboxImage.style.visibility = "visible";
+    lightboxImage.src = src;
+  });
+});
+lightboxImage.addEventListener("load", () => {
+  $("#lightboxLoading").hidden = true;
+  $("#lightboxError").hidden = true;
+  lightboxImage.style.visibility = "visible";
+  lightboxImage.classList.add("ready");
+  updateLightbox();
+});
+lightboxImage.addEventListener("error", () => {
+  $("#lightboxLoading").hidden = true;
+  $("#lightboxError").hidden = false;
+  lightboxImage.classList.remove("ready");
+});
 lightboxStage.addEventListener("wheel", (event) => {
   event.preventDefault();
-  setZoom(state.lightbox.zoom + (event.deltaY < 0 ? .18 : -.18));
+  setZoom(state.lightbox.zoom + (event.deltaY < 0 ? .2 : -.2));
 }, { passive: false });
 lightboxStage.addEventListener("pointerdown", (event) => {
-  state.lightbox.dragging = true;
-  state.lightbox.startX = event.clientX - state.lightbox.x;
-  state.lightbox.startY = event.clientY - state.lightbox.y;
-  lightboxStage.classList.add("dragging");
+  const item = state.lightbox;
+  item.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (item.pointers.size === 1) {
+    item.swipeStart = { x: event.clientX, y: event.clientY, time: Date.now() };
+    item.dragging = item.zoom > 1;
+    item.startX = event.clientX - item.x;
+    item.startY = event.clientY - item.y;
+  } else if (item.pointers.size === 2) {
+    item.pinchDistance = pointerDistance(item.pointers);
+    item.pinchZoom = item.zoom;
+    item.dragging = false;
+  }
+  lightboxStage.classList.toggle("dragging", item.dragging);
   lightboxStage.setPointerCapture(event.pointerId);
 });
 lightboxStage.addEventListener("pointermove", (event) => {
-  if (!state.lightbox.dragging) return;
-  state.lightbox.x = event.clientX - state.lightbox.startX;
-  state.lightbox.y = event.clientY - state.lightbox.startY;
-  updateLightbox();
+  const item = state.lightbox;
+  if (!item.pointers.has(event.pointerId)) return;
+  item.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (item.pointers.size === 2) {
+    const distance = pointerDistance(item.pointers);
+    if (item.pinchDistance > 0) setZoom(item.pinchZoom * (distance / item.pinchDistance));
+    return;
+  }
+  if (item.dragging && item.zoom > 1) {
+    item.x = event.clientX - item.startX;
+    item.y = event.clientY - item.startY;
+    updateLightbox();
+  }
 });
-lightboxStage.addEventListener("pointerup", () => {
-  state.lightbox.dragging = false;
-  lightboxStage.classList.remove("dragging");
+function releaseLightboxPointer(event, cancelled = false) {
+  const item = state.lightbox;
+  const start = item.swipeStart;
+  const wasSinglePointer = item.pointers.size === 1;
+  item.pointers.delete(event.pointerId);
+  if (!cancelled && wasSinglePointer && item.zoom === 1 && start) {
+    const deltaX = event.clientX - start.x;
+    const deltaY = event.clientY - start.y;
+    const elapsed = Date.now() - start.time;
+    if (elapsed < 700 && Math.abs(deltaX) > 65 && Math.abs(deltaY) < 70) stepLightbox(deltaX < 0 ? 1 : -1);
+  }
+  if (item.pointers.size === 1) {
+    const remaining = [...item.pointers.values()][0];
+    item.startX = remaining.x - item.x;
+    item.startY = remaining.y - item.y;
+    item.dragging = item.zoom > 1;
+  } else if (item.pointers.size === 0) {
+    item.dragging = false;
+    item.swipeStart = null;
+  }
+  item.pinchDistance = 0;
+  item.pinchZoom = item.zoom;
+  lightboxStage.classList.toggle("dragging", item.dragging);
+}
+lightboxStage.addEventListener("pointerup", (event) => {
+  releaseLightboxPointer(event);
 });
-lightboxStage.addEventListener("pointercancel", () => {
+lightboxStage.addEventListener("pointercancel", (event) => {
+  releaseLightboxPointer(event, true);
+});
+lightboxStage.addEventListener("lostpointercapture", (event) => {
+  if (!state.lightbox.pointers.has(event.pointerId)) return;
+  releaseLightboxPointer(event, true);
+});
+lightbox.addEventListener("close", () => {
+  state.lightbox.pointers.clear();
   state.lightbox.dragging = false;
   lightboxStage.classList.remove("dragging");
 });
@@ -1750,7 +1937,20 @@ document.addEventListener("error", (event) => {
 }, true);
 
 window.addEventListener("hashchange", () => route());
+window.addEventListener("resize", () => {
+  if (lightbox.open) updateLightbox();
+});
 window.addEventListener("keydown", (event) => {
+  if (lightbox.open) {
+    if (event.key === "ArrowLeft") stepLightbox(-1);
+    else if (event.key === "ArrowRight") stepLightbox(1);
+    else if (event.key === "+" || event.key === "=") setZoom(state.lightbox.zoom + .25);
+    else if (event.key === "-") setZoom(state.lightbox.zoom - .25);
+    else if (event.key === "0") setZoom(1);
+    else return;
+    event.preventDefault();
+    return;
+  }
   if (event.key === "/" && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
     event.preventDefault();
     $("#globalSearchInput").focus();
