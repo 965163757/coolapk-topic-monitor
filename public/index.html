@@ -8,70 +8,107 @@
     <title>酷窗 · 酷安 Web 工作台</title>
     <link rel="preload" href="/vendor/phosphor/regular/Phosphor.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/vendor/phosphor/regular/style.css" />
-    <link rel="stylesheet" href="/styles.css?v=3.4.2" />
-    <script type="module" src="/app.js?v=3.4.2" fetchpriority="high"></script>
+    <link rel="stylesheet" href="/styles.css?v=4.0.0-final5" />
+    <link rel="stylesheet" href="/styles-v4.css?v=4.0.0-final5" />
+    <script type="module" src="/app.js?v=4.0.0-final5" fetchpriority="high"></script>
   </head>
   <body>
+    <a class="skip-link" href="#viewHost">跳到主要内容</a>
+
     <div class="app-shell">
-      <aside class="side-rail" id="sideRail">
-        <a class="brand" href="#/home" aria-label="返回首页">
-          <span class="brand-mark"><i class="ph ph-lightning"></i></span>
-          <span><strong>酷窗</strong><small>COOLAPK WEB</small></span>
-        </a>
+      <header class="side-rail global-header" id="sideRail">
+        <div class="topbar global-header-inner">
+          <button class="mobile-menu" id="mobileMenu" type="button" aria-label="打开导航" aria-controls="primaryNavigation" aria-expanded="false">
+            <i class="ph ph-list" aria-hidden="true"></i>
+          </button>
 
-        <nav class="main-nav" aria-label="主导航">
-          <p>浏览</p>
-          <a href="#/home" data-nav="home"><i class="ph ph-house"></i><span>首页</span></a>
-          <a href="#/discover" data-nav="discover"><i class="ph ph-compass"></i><span>动态广场</span></a>
-          <a href="#/apps" data-nav="apps"><i class="ph ph-squares-four"></i><span>应用与游戏</span></a>
-          <a href="#/topics" data-nav="topics"><i class="ph ph-hash"></i><span>话题</span></a>
-          <a href="#/notifications" data-nav="notifications"><i class="ph ph-bell"></i><span>通知与私信</span><b id="notificationNavCount">0</b></a>
-          <a href="#/account" data-nav="account"><i class="ph ph-user-circle"></i><span>账号中心</span></a>
-          <p>智能工作台</p>
-          <a href="#/monitor" data-nav="monitor"><i class="ph ph-radar"></i><span>话题监控</span><b id="monitorNavCount">0</b></a>
-          <a href="#/ai" data-nav="ai"><i class="ph ph-sparkle"></i><span>AI 命中</span><b class="accent" id="aiNavCount">0</b></a>
-          <a href="#/settings" data-nav="settings"><i class="ph ph-gear-six"></i><span>系统设置</span></a>
-        </nav>
+          <a class="brand" href="#/home" aria-label="酷窗首页">
+            <span class="brand-mark" aria-hidden="true"><i class="ph ph-lightning"></i></span>
+            <span><strong>酷窗</strong><small>云白指挥台</small></span>
+          </a>
 
-        <div class="rail-status">
-          <span class="live-dot" id="liveDot"></span>
-          <div><strong id="railStatusTitle">正在连接</strong><small id="railStatusText">读取服务状态…</small></div>
+          <nav class="main-nav" id="primaryNavigation" aria-label="主导航">
+            <a href="#/home" data-nav="home"><i class="ph ph-house" aria-hidden="true"></i><span>首页</span></a>
+            <a href="#/discover" data-nav="discover"><i class="ph ph-compass" aria-hidden="true"></i><span>动态</span></a>
+            <a href="#/apps" data-nav="apps"><i class="ph ph-squares-four" aria-hidden="true"></i><span>应用</span></a>
+            <a href="#/topics" data-nav="topics"><i class="ph ph-hash" aria-hidden="true"></i><span>话题</span></a>
+            <a href="#/monitor" data-nav="monitor">
+              <i class="ph ph-radar" aria-hidden="true"></i><span>监控</span><b id="monitorNavCount" aria-label="监控话题数量">0</b>
+            </a>
+          </nav>
+
+          <form class="global-search" id="globalSearchForm" role="search" aria-label="全站搜索">
+            <i class="ph ph-magnifying-glass" aria-hidden="true"></i>
+            <input id="globalSearchInput" type="search" autocomplete="off" enterkeyhint="search" aria-label="搜索" placeholder="搜索帖子、话题、用户或应用" />
+            <kbd aria-hidden="true">Enter</kbd>
+          </form>
+
+          <div class="top-actions" aria-label="快捷操作">
+            <button class="compose-trigger" id="composeTrigger" type="button">
+              <i class="ph ph-pencil-simple-line" aria-hidden="true"></i><span>写动态</span>
+            </button>
+            <button id="quickRefresh" type="button" aria-label="刷新当前页面" title="刷新">
+              <i class="ph ph-arrows-clockwise" aria-hidden="true"></i>
+            </button>
+            <a class="notification-trigger" href="#/notifications" data-nav="notifications" aria-label="通知与私信">
+              <i class="ph ph-bell" aria-hidden="true"></i><b id="notificationNavCount" aria-label="未读通知数量">0</b>
+            </a>
+            <button id="themeToggle" type="button" aria-label="切换深色模式" title="切换主题">
+              <i class="ph ph-moon" aria-hidden="true"></i>
+            </button>
+            <a class="profile-chip" id="accountChip" href="#/account" data-nav="account" aria-label="账号中心">
+              <span id="accountChipAvatar" aria-hidden="true"><i class="ph ph-user"></i></span>
+              <div><strong id="accountChipName">连接账号</strong><small id="accountChipStatus">公开浏览</small></div>
+            </a>
+            <details class="header-more">
+              <summary aria-label="更多功能"><i class="ph ph-caret-down" aria-hidden="true"></i></summary>
+              <nav class="header-more-menu" aria-label="更多功能">
+                <a href="#/ai" data-nav="ai"><i class="ph ph-sparkle" aria-hidden="true"></i><span>AI 命中</span><b class="accent" id="aiNavCount">0</b></a>
+                <a href="#/settings" data-nav="settings"><i class="ph ph-gear-six" aria-hidden="true"></i><span>系统设置</span></a>
+                <div class="header-quick-actions" aria-label="快捷操作">
+                  <button class="header-menu-action mobile-only-action" type="button" data-header-action="compose">
+                    <i class="ph ph-pencil-simple-line" aria-hidden="true"></i><span>写动态</span>
+                  </button>
+                  <a class="header-menu-action mobile-only-action" href="#/notifications" data-nav="notifications">
+                    <i class="ph ph-bell" aria-hidden="true"></i><span>通知</span>
+                  </a>
+                  <button class="header-menu-action compact-menu-action" type="button" data-header-action="refresh">
+                    <i class="ph ph-arrows-clockwise" aria-hidden="true"></i><span>刷新</span>
+                  </button>
+                  <button class="header-menu-action compact-menu-action" type="button" data-header-action="theme" aria-label="切换深色模式">
+                    <i class="ph ph-moon" aria-hidden="true"></i><span>深色模式</span>
+                  </button>
+                  <a class="header-menu-action mobile-only-action" href="#/account" data-nav="account">
+                    <i class="ph ph-user-circle" aria-hidden="true"></i><span>账号</span>
+                  </a>
+                </div>
+                <div class="rail-status" role="status">
+                  <span class="live-dot" id="liveDot" aria-hidden="true"></span>
+                  <div><strong id="railStatusTitle">正在连接</strong><small id="railStatusText">读取服务状态…</small></div>
+                </div>
+                <footer class="rail-footer">
+                  <button id="collapseRail" type="button"><i class="ph ph-sidebar-simple" aria-hidden="true"></i><span>收起导航</span></button>
+                </footer>
+              </nav>
+            </details>
+          </div>
         </div>
-        <footer class="rail-footer">
-          <button id="collapseRail" type="button" aria-label="折叠侧栏"><i class="ph ph-sidebar-simple"></i><span>收起导航</span></button>
-        </footer>
-      </aside>
+      </header>
 
       <div class="workspace">
-        <header class="topbar">
-          <button class="mobile-menu" id="mobileMenu" type="button" aria-label="打开导航"><i class="ph ph-list"></i></button>
-          <form class="global-search" id="globalSearchForm" role="search">
-            <i class="ph ph-magnifying-glass"></i>
-            <input id="globalSearchInput" type="search" autocomplete="off" placeholder="搜索帖子、话题、用户或应用" />
-            <kbd>Enter</kbd>
-          </form>
-          <div class="top-actions">
-            <button class="compose-trigger" id="composeTrigger" type="button" aria-label="发布动态"><i class="ph ph-pencil-simple-line"></i><span>写动态</span></button>
-            <button id="quickRefresh" type="button" aria-label="刷新当前页面"><i class="ph ph-arrows-clockwise"></i></button>
-            <button id="themeToggle" type="button" aria-label="切换深色模式"><i class="ph ph-moon"></i></button>
-            <a class="profile-chip" id="accountChip" href="#/account"><span id="accountChipAvatar"><i class="ph ph-user"></i></span><div><strong id="accountChipName">连接酷安账号</strong><small id="accountChipStatus">公开浏览模式</small></div></a>
-          </div>
-        </header>
-
         <main class="view-host" id="viewHost" tabindex="-1">
-          <section class="page-loading" aria-label="页面加载中">
-            <span class="loading-logo"><i class="ph ph-lightning"></i></span>
+          <section class="page-loading" aria-label="页面加载中" aria-live="polite">
+            <span class="loading-logo" aria-hidden="true"><i class="ph ph-lightning"></i></span>
             <h1>正在打开酷窗</h1>
-            <p>同步公开内容与监控状态…</p>
           </section>
         </main>
 
         <nav class="mobile-tabs" aria-label="移动端导航">
-          <a href="#/home" data-nav="home"><i class="ph ph-house"></i><span>首页</span></a>
-          <a href="#/discover" data-nav="discover"><i class="ph ph-compass"></i><span>动态</span></a>
-          <a href="#/apps" data-nav="apps"><i class="ph ph-squares-four"></i><span>应用</span></a>
-          <a href="#/monitor" data-nav="monitor"><i class="ph ph-radar"></i><span>监控</span></a>
-          <a href="#/account" data-nav="account"><i class="ph ph-user-circle"></i><span>我的</span></a>
+          <a href="#/home" data-nav="home"><i class="ph ph-house" aria-hidden="true"></i><span>首页</span></a>
+          <a href="#/discover" data-nav="discover"><i class="ph ph-compass" aria-hidden="true"></i><span>动态</span></a>
+          <a href="#/apps" data-nav="apps"><i class="ph ph-squares-four" aria-hidden="true"></i><span>应用</span></a>
+          <a href="#/topics" data-nav="topics"><i class="ph ph-hash" aria-hidden="true"></i><span>话题</span></a>
+          <a href="#/monitor" data-nav="monitor"><i class="ph ph-radar" aria-hidden="true"></i><span>监控</span></a>
         </nav>
       </div>
     </div>

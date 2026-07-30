@@ -344,6 +344,33 @@ function feedCard(feed, options = {}) {
   const scoreMarkup = Number.isFinite(score)
     ? `<span class="ai-badge ${evaluation.matched ? "matched" : ""}"><i class="ph ph-sparkle"></i>${Math.round(score * 100)}%</span>`
     : evaluation?.status === "error" ? `<span class="ai-badge error"><i class="ph ph-warning"></i>判断异常</span>` : "";
+
+  if (options.home) {
+    const summary = message && message !== title ? message : "";
+    return `
+      <article class="feed-card home-feed-card compact" data-feed-card="${escapeHtml(feed.id)}">
+        <div class="home-feed-identity">${avatarMarkup(feed.avatar, feed.username)}</div>
+        <div class="home-feed-copy">
+          <header class="home-feed-byline">
+            <button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username || "酷友")}</button>
+            ${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(`topic:${feed.topic}`)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}
+          </header>
+          <button class="home-feed-open" type="button" data-feed="${escapeHtml(feed.id)}" aria-label="查看动态：${escapeHtml(title)}">
+            <h2 class="feed-title">${escapeHtml(title)}</h2>
+            ${summary ? `<p class="feed-text">${escapeHtml(summary)}</p>` : ""}
+          </button>
+        </div>
+        ${feedImageMarkup(feed)}
+        <footer class="feed-meta home-feed-actions">
+          <small class="home-feed-time">${escapeHtml(relativeTime(feed.createdAt))}</small>
+          <button type="button" data-feed="${escapeHtml(feed.id)}" aria-label="查看 ${compactNumber(feed.comments)} 条评论"><i class="ph ph-chat-circle"></i>${compactNumber(feed.comments)}</button>
+          <button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}" aria-label="${feed.liked ? "取消点赞" : "点赞"}，当前 ${compactNumber(feed.likes)} 个赞"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i><span data-interaction-count data-count="${Number(feed.likes || 0)}">${compactNumber(feed.likes)}</span></button>
+          <button class="share-action" type="button" data-share-feed="${escapeHtml(feed.id)}" data-share-url="${escapeHtml(feed.url || `https://www.coolapk.com/feed/${feed.id}`)}" data-share-title="${escapeHtml(title)}" aria-label="分享动态"><i class="ph ph-share-network"></i></button>
+          ${scoreMarkup}
+        </footer>
+      </article>`;
+  }
+
   return `
     <article class="feed-card ${options.compact ? "compact" : ""}" data-feed-card="${escapeHtml(feed.id)}">
       <div class="feed-card-main">
@@ -371,7 +398,7 @@ function feedCard(feed, options = {}) {
 
 function feedStream(feeds, options = {}) {
   return feeds?.length
-    ? `<div class="feed-stream">${feeds.map((feed) => feedCard(feed, options)).join("")}</div>`
+    ? `<div class="feed-stream ${options.home ? "home-feed-list" : ""}">${feeds.map((feed) => feedCard(feed, options)).join("")}</div>`
     : emptyState("newspaper", "暂时没有内容", "该频道当前没有返回可展示的公开动态，请稍后刷新。");
 }
 
@@ -423,16 +450,19 @@ function renderShortcuts(shortcuts = []) {
     { title: "数码", url: "channel:digital", icon: "device-mobile" },
     { title: "话题", url: "#/topics", icon: "hash" },
   ];
-  const items = shortcuts.length ? shortcuts.slice(0, 10) : fallback;
-  return `<div class="shortcut-strip">${items.map((item) => `<button class="shortcut" type="button" data-smart-link="${escapeHtml(item.url)}" data-link-title="${escapeHtml(item.title)}" aria-label="打开${escapeHtml(item.title)}">${item.picture ? imageMarkup(item.picture, { width: 240, quality: 72 }) : `<span class="shortcut-icon"><i class="ph ph-${escapeHtml(item.icon || "sparkle")}"></i></span>`}<span>${escapeHtml(item.title)}</span><i class="ph ph-arrow-up-right"></i></button>`).join("")}</div>`;
+  const items = shortcuts.length ? shortcuts.slice(0, 8) : fallback;
+  return `<nav class="shortcut-strip channel-shortcut-strip" aria-label="频道入口">${items.map((item) => `<button class="shortcut" type="button" data-smart-link="${escapeHtml(item.url)}" data-link-title="${escapeHtml(item.title)}" aria-label="打开${escapeHtml(item.title)}">${item.picture ? imageMarkup(item.picture, { width: 160, quality: 72 }) : `<span class="shortcut-icon"><i class="ph ph-${escapeHtml(item.icon || "sparkle")}"></i></span>`}<span>${escapeHtml(item.title)}</span><i class="ph ph-caret-right"></i></button>`).join("")}</nav>`;
 }
 
 function renderEditorialSections(sections = []) {
-  return sections.filter((section) => section?.items?.length).slice(0, 3).map((section) => `
-    <section class="surface editorial-section">
-      <header class="surface-head"><div><h2>${escapeHtml(/^(?:#?\/|[A-Za-z]+:\/\/)/.test(String(section.title || "")) ? "参与社区讨论" : section.title || "精选内容")}</h2><p>来自酷安编辑推荐，点击后在站内继续浏览</p></div><span>${section.items.length} 条</span></header>
-      <div class="editorial-grid">${section.items.slice(0, 12).map((item, index) => `<button type="button" data-smart-link="${escapeHtml(item.url)}" data-link-title="${escapeHtml(item.title)}" aria-label="打开：${escapeHtml(item.title)}">${item.picture ? imageMarkup(item.picture, { width: 360, quality: 74 }) : `<span>${String(index + 1).padStart(2, "0")}</span>`}<div><small>${escapeHtml(item.entityType === "feed" ? "精选动态" : "社区内容")}</small><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.subtitle || "查看完整内容")}</p></div><i class="ph ph-caret-right"></i></button>`).join("")}</div>
-    </section>`).join("");
+  return sections.filter((section) => section?.items?.length).slice(0, 2).map((section) => {
+    const heading = /^(?:#?\/|[A-Za-z]+:\/\/)/.test(String(section.title || "")) ? "社区精选" : section.title || "精选内容";
+    return `
+      <section class="surface editorial-section channel-inline-section">
+        <header class="surface-head"><div><h3>${escapeHtml(heading)}</h3></div><span>${section.items.length}</span></header>
+        <div class="editorial-grid">${section.items.slice(0, 8).map((item, index) => `<button type="button" data-smart-link="${escapeHtml(item.url)}" data-link-title="${escapeHtml(item.title)}" aria-label="打开：${escapeHtml(item.title)}">${item.picture ? imageMarkup(item.picture, { width: 320, quality: 74 }) : `<span>${String(index + 1).padStart(2, "0")}</span>`}<div><strong>${escapeHtml(item.title)}</strong>${item.subtitle ? `<p>${escapeHtml(item.subtitle)}</p>` : ""}</div><i class="ph ph-caret-right"></i></button>`).join("")}</div>
+      </section>`;
+  }).join("");
 }
 
 function homeChannelMeta(channel) {
@@ -440,8 +470,21 @@ function homeChannelMeta(channel) {
 }
 
 function trendingTopicMarkup(topics = []) {
-  return topics.slice(0, 8).map((topic, index) => `<button class="topic-mini" type="button" data-public-topic="${escapeHtml(topic.sourceKey || topic.url || `topic:${topic.tag || topic.title}`)}"><b>${index + 1}</b>${topic.logo ? imageMarkup(topic.logo, { width: 128, quality: 72 }) : `<span><i class="ph ph-hash"></i></span>`}<div><strong>${escapeHtml(topic.title || topic.tag)}</strong><small>${compactNumber(topic.followers || 0)} 关注 · ${compactNumber(topic.posts || 0)} 动态</small></div><i class="ph ph-caret-right"></i></button>`).join("")
-    || emptyState("hash", "等待话题数据", "切换到话题页进行搜索。");
+  if (!topics.length) return `<div class="home-topic-empty"><i class="ph ph-hash"></i><span>热榜同步中</span></div>`;
+  return topics.slice(0, 6).map((topic, index) => {
+    const title = topic.title || topic.tag || "热门话题";
+    const source = topic.sourceKey || topic.url || `topic:${topic.tag || title}`;
+    const monitorSource = topic.sourceKey || topic.tag || title;
+    const monitored = state.topics.some((item) => item.sourceKey === monitorSource || item.tag === monitorSource || item.tag === topic.tag);
+    return `<article class="trending-topic-row">
+      <button class="trending-topic-main" type="button" data-public-topic="${escapeHtml(source)}" aria-label="查看话题：${escapeHtml(title)}">
+        <b>${String(index + 1).padStart(2, "0")}</b>
+        ${topic.logo ? imageMarkup(topic.logo, { width: 96, quality: 72 }) : `<span class="trending-topic-icon"><i class="ph ph-hash"></i></span>`}
+        <div><strong>${escapeHtml(title)}</strong><small>${compactNumber(topic.followers || 0)} 关注 · ${compactNumber(topic.posts || topic.hot || 0)} 动态</small></div>
+      </button>
+      <button class="trending-topic-monitor" type="button" data-monitor-add="${escapeHtml(monitorSource)}" aria-label="${monitored ? "已监控" : "加入监控"}：${escapeHtml(title)}" ${monitored ? "disabled" : ""}><i class="ph ph-${monitored ? "check" : "radar"}"></i><span>${monitored ? "已监控" : "监控"}</span></button>
+    </article>`;
+  }).join("");
 }
 
 async function loadBaseState() {
@@ -503,12 +546,17 @@ function parseRoute() {
 
 async function route({ force = false } = {}) {
   closeAllDialogs();
+  const headerMore = $(".header-more");
+  if (headerMore) headerMore.open = false;
   state.imageGroups.clear();
   const parsed = parseRoute();
   state.route = parsed.route;
   state.routeParams = parsed.params;
+  document.body.dataset.route = parsed.route;
   setActiveNavigation(parsed.route);
   document.body.classList.remove("mobile-rail-open");
+  $("#mobileMenu")?.setAttribute("aria-expanded", "false");
+  $("#mobileMenu")?.setAttribute("aria-expanded", "false");
   clearInterval(state.carouselTimer);
   const sequence = ++state.requestSequence;
   viewHost.innerHTML = pageLoading({
@@ -581,42 +629,85 @@ async function renderHome({ force, sequence }) {
   const data = await channelData("home", { force });
   if (sequence !== state.requestSequence) return;
   const topics = data.topics || [];
+  const homeFeeds = data.feeds || [];
   const requested = state.routeParams.get("channel") || "home";
   const initialChannel = HOME_CHANNELS.some((item) => item.key === requested) ? requested : "home";
   const initialMeta = homeChannelMeta(initialChannel);
+  const feedById = new Map(homeFeeds.map((feed) => [String(feed.id), feed]));
+  const latestHits = state.evaluations.filter((item) => item.matched && item.feedId).slice(0, 3);
+  const runtimeLabel = state.status?.refreshing ? "同步中" : state.status ? "运行中" : "连接中";
+  const nextPollLabel = state.status?.nextPollAt ? `下次 ${formatDate(state.status.nextPollAt)}` : "每 5 分钟同步";
+  const latestHitMarkup = latestHits.length ? latestHits.map((item) => {
+    const feed = feedById.get(String(item.feedId));
+    const score = Number(item.matchScore ?? item.confidence);
+    const percent = Number.isFinite(score) ? Math.round(Math.max(0, Math.min(1, score)) * 100) : null;
+    const reasonLead = String(item.reason || "").split(/[，。；;：:]/)[0].trim();
+    const fallbackTitle = /的动态$/.test(String(item.title || ""))
+      ? reasonLead || `${item.topic || "监控规则"}命中`
+      : item.title || reasonLead || `动态 ${item.feedId}`;
+    const title = feed ? displayFeedTitle(feed) : fallbackTitle;
+    const picture = feed?.pictures?.find(Boolean) || item.picture || item.image || "";
+    return `<article class="home-hit-row">
+      <button class="home-hit-main" type="button" data-feed="${escapeHtml(item.feedId)}" aria-label="查看命中动态：${escapeHtml(title)}">
+        ${picture ? imageMarkup(picture, { width: 240, quality: 74 }) : `<span class="home-hit-thumb"><i class="ph ph-sparkle"></i></span>`}
+        <div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(item.reason || "符合当前监控规则")}</p></div>
+        <span class="home-hit-score"><strong>${percent == null ? "—" : `${percent}%`}</strong><small>匹配</small></span>
+      </button>
+      ${item.topic ? `<button class="home-hit-topic" type="button" data-monitor-topic="${escapeHtml(item.topic)}"><i class="ph ph-hash"></i>${escapeHtml(item.topic)}</button>` : ""}
+    </article>`;
+  }).join("") : `<div class="home-hit-empty"><i class="ph ph-sparkle"></i><strong>暂无命中</strong><a href="#/monitor">查看监控</a></div>`;
+
   state.home = {
     channel: initialChannel,
     page: 1,
-    feeds: initialChannel === "home" ? data.feeds || [] : [],
+    feeds: initialChannel === "home" ? homeFeeds : [],
     supportingData: initialChannel === "home" ? {} : null,
     requestId: state.home.requestId,
     loading: initialChannel !== "home",
   };
-  viewHost.innerHTML = `<section class="page home-page">
-    ${pageHead("COOLAPK HOME", "酷安首页", "编辑精选、社区频道、热门话题与实时动态都在站内连续浏览。", `<a class="btn secondary" href="#/monitor"><i class="ph ph-radar"></i>智能监控</a><button class="btn primary" type="button" data-route-refresh><i class="ph ph-arrows-clockwise"></i>刷新内容</button>`)}
-    <div class="content-layout">
-      <div class="content-column">
-        ${renderHero(data.banners)}
-        <section class="surface home-shortcuts"><header class="surface-head"><div><h2>快捷入口</h2><p>专题、热闻与官方内容均在站内打开</p></div><a href="#/discover">动态广场<i class="ph ph-caret-right"></i></a></header>${renderShortcuts(data.shortcuts)}</section>
-        ${renderEditorialSections(data.sections)}
+
+  viewHost.innerHTML = `<section class="page home-page home-command-page">
+    <nav class="channel-tabs home-channel-tabs" id="homeChannelTabs" aria-label="首页内容频道" role="tablist">
+      ${HOME_CHANNELS.map((item) => `<button class="${item.key === initialChannel ? "active" : ""}" id="homeChannelTab-${item.key}" type="button" role="tab" data-home-channel="${item.key}" aria-controls="homeFeedRegion" aria-selected="${item.key === initialChannel ? "true" : "false"}" tabindex="${item.key === initialChannel ? "0" : "-1"}"><i class="ph ph-${item.icon}"></i><span>${item.label}</span></button>`).join("")}
+      <a class="home-channel-more" href="#/discover"><i class="ph ph-squares-four"></i><span>广场</span></a>
+    </nav>
+
+    <section class="surface home-topic-board">
+      <header class="home-topic-board-head"><div><i class="ph-fill ph-fire"></i><h2>热门话题</h2></div><a href="#/topics">查看全部<i class="ph ph-caret-right"></i></a></header>
+      <div class="home-topic-bar" id="homeTrendingTopics">${trendingTopicMarkup(topics)}</div>
+    </section>
+
+    <div class="content-layout home-workspace">
+      <main class="content-column">
         <section class="home-feed-panel" id="homeFeedPanel">
-          <header class="home-channel-head"><div><small>COMMUNITY CHANNEL</small><h2 id="homeChannelTitle">${escapeHtml(initialMeta.label)}</h2><p id="homeChannelDescription">${escapeHtml(initialMeta.description)}</p></div><span id="homeChannelStatus">${initialChannel === "home" ? `${data.feeds.length} 条内容` : "正在加载"}</span></header>
-          <nav class="channel-tabs" id="homeChannelTabs" aria-label="首页内容频道">
-            ${HOME_CHANNELS.map((item) => `<button class="${item.key === initialChannel ? "active" : ""}" type="button" data-home-channel="${item.key}" aria-selected="${item.key === initialChannel ? "true" : "false"}"><i class="ph ph-${item.icon}"></i>${item.label}</button>`).join("")}
-          </nav>
-          <div id="homeFeedRegion" aria-live="polite" aria-busy="${initialChannel === "home" ? "false" : "true"}">${initialChannel === "home" ? feedStream(data.feeds) : skeletonFeeds(2)}</div>
-          <div class="load-more home-load-more"><button class="btn secondary" type="button" data-home-load-more ${initialChannel === "home" && data.feeds.length ? "" : "disabled"}><i class="ph ph-plus-circle"></i>加载更多${escapeHtml(initialMeta.label)}</button></div>
+          <header class="home-feed-toolbar">
+            <div><h2 id="homeChannelTitle">${escapeHtml(initialMeta.label)}动态</h2><p id="homeChannelDescription">${escapeHtml(initialMeta.description)}</p></div>
+            <div class="home-feed-toolbar-actions"><span id="homeChannelStatus">${initialChannel === "home" ? `${homeFeeds.length} 条` : "正在加载"}</span><button type="button" data-route-refresh aria-label="刷新内容"><i class="ph ph-arrows-clockwise"></i><span>刷新</span></button></div>
+          </header>
+          <div id="homeFeedRegion" role="tabpanel" aria-labelledby="homeChannelTab-${initialChannel}" aria-live="polite" aria-busy="${initialChannel === "home" ? "false" : "true"}">${initialChannel === "home" ? feedStream(homeFeeds, { home: true }) : skeletonFeeds(4)}</div>
+          <div class="load-more home-load-more"><button class="btn secondary" type="button" data-home-load-more ${initialChannel === "home" && homeFeeds.length ? "" : "disabled"}><i class="ph ph-plus-circle"></i>加载更多</button></div>
         </section>
-      </div>
-      <aside class="side-column">
-        <section class="surface home-monitor-card"><header class="surface-head"><div><h3>智能监控</h3><p>每 5 分钟自动抓取与判断</p></div><a href="#/monitor">管理<i class="ph ph-caret-right"></i></a></header>
-          <div class="stat-list"><article><small>监控话题</small><strong id="homeStatTopics">${state.topics.length}</strong></article><article><small>AI 命中</small><strong id="homeStatMatched">${compactNumber(state.evaluationStats.matched)}</strong></article><article><small>已通知</small><strong id="homeStatNotified">${compactNumber(state.evaluationStats.notified)}</strong></article><article><small>归档动态</small><strong id="homeStatArchived">${compactNumber(state.status?.archive?.feeds)}</strong></article></div>
+      </main>
+
+      <aside class="side-column home-monitor-rail">
+        <section class="surface home-monitor-card ai-command-card">
+          <header class="home-monitor-head"><div><h2>AI 监控</h2><span class="home-monitor-state"><i></i>${runtimeLabel}</span></div><a href="#/monitor">管理<i class="ph ph-caret-right"></i></a></header>
+          <div class="home-monitor-summary">
+            <article><small>监控话题</small><strong id="homeStatTopics">${state.topics.length}</strong></article>
+            <article><small>已判断</small><strong>${compactNumber(state.evaluationStats.total)}</strong></article>
+            <article><small>AI 命中</small><strong id="homeStatMatched">${compactNumber(state.evaluationStats.matched)}</strong></article>
+            <article><small>已通知</small><strong id="homeStatNotified">${compactNumber(state.evaluationStats.notified)}</strong></article>
+          </div>
+          <div class="home-monitor-meta"><span><i class="ph ph-clock"></i>${escapeHtml(nextPollLabel)}</span><span>归档 <b id="homeStatArchived">${compactNumber(state.status?.archive?.feeds)}</b></span></div>
+          <section class="home-latest-hits">
+            <header><h3>最新命中</h3><a href="#/ai">查看全部<i class="ph ph-caret-right"></i></a></header>
+            <div class="home-hit-list">${latestHitMarkup}</div>
+          </section>
         </section>
-        <section class="surface trending-topics"><header class="surface-head"><div><h3>热门话题</h3><p>来自真实话题榜单</p></div><a href="#/topics">查看全部</a></header><div class="topic-mini-list" id="homeTrendingTopics">${trendingTopicMarkup(topics)}</div></section>
       </aside>
     </div>
   </section>`;
-  startCarousel();
+
   trendingRequest.then((trending) => {
     const region = $("#homeTrendingTopics");
     if (!region || sequence !== state.requestSequence || state.route !== "home" || !trending.topics?.length) return;
@@ -639,8 +730,10 @@ async function loadHomeChannel(channel, { append = false, force = false, updateU
     const active = button.dataset.homeChannel === channel;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
-  $("#homeChannelTitle").textContent = meta.label;
+  region.setAttribute("aria-labelledby", `homeChannelTab-${channel}`);
+  $("#homeChannelTitle").textContent = `${meta.label}动态`;
   $("#homeChannelDescription").textContent = meta.description;
   $("#homeChannelStatus").textContent = append ? `正在加载第 ${nextPage} 页` : "正在加载";
   region.setAttribute("aria-busy", "true");
@@ -672,7 +765,7 @@ async function loadHomeChannel(channel, { append = false, force = false, updateU
       supportingData.topics?.length ? `<section class="surface channel-inline-section"><header class="surface-head"><div><h3>话题与产品</h3><p>${supportingData.topics.length} 个结果</p></div></header><div class="entity-section-body">${topicGrid(supportingData.topics)}</div></section>` : "",
       supportingData.users?.length ? `<section class="surface channel-inline-section"><header class="surface-head"><div><h3>推荐酷友</h3><p>${supportingData.users.length} 位用户</p></div></header><div class="entity-section-body">${userCards(supportingData.users)}</div></section>` : "",
     ].filter(Boolean).join("");
-    region.innerHTML = `${supportingContent}${feeds.length || !supportingContent ? feedStream(feeds) : ""}`;
+    region.innerHTML = `${supportingContent}${feeds.length || !supportingContent ? feedStream(feeds, { home: true }) : ""}`;
     $("#homeChannelStatus").textContent = `${feeds.length + supportingCount} 条内容 · 第 ${nextPage} 页`;
     if (loadMore) {
       loadMore.disabled = addedFeedCount <= 0;
@@ -2404,8 +2497,17 @@ $("#globalSearchForm").addEventListener("submit", (event) => {
   const keyword = $("#globalSearchInput").value.trim();
   if (keyword) location.hash = `#/search?q=${encodeURIComponent(keyword)}`;
 });
+$("#globalSearchInput").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  const keyword = event.currentTarget.value.trim();
+  if (keyword) location.hash = `#/search?q=${encodeURIComponent(keyword)}`;
+});
 
-$("#mobileMenu").addEventListener("click", () => document.body.classList.toggle("mobile-rail-open"));
+$("#mobileMenu").addEventListener("click", (event) => {
+  const open = document.body.classList.toggle("mobile-rail-open");
+  event.currentTarget.setAttribute("aria-expanded", String(open));
+});
 $("#collapseRail").addEventListener("click", () => {
   document.body.classList.toggle("rail-collapsed");
   localStorage.setItem("coolweb:rail-collapsed", document.body.classList.contains("rail-collapsed") ? "1" : "0");
@@ -2418,12 +2520,37 @@ $("#quickRefresh").addEventListener("click", (event) => {
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  $("#themeToggle").innerHTML = `<i class="ph ph-${theme === "dark" ? "sun" : "moon"}"></i>`;
+  const toggle = $("#themeToggle");
+  toggle.innerHTML = `<i class="ph ph-${theme === "dark" ? "sun" : "moon"}"></i>`;
+  toggle.setAttribute("aria-label", theme === "dark" ? "切换浅色模式" : "切换深色模式");
+  toggle.title = theme === "dark" ? "切换浅色模式" : "切换深色模式";
+  const menuToggle = $('[data-header-action="theme"]');
+  if (menuToggle) {
+    menuToggle.innerHTML = `<i class="ph ph-${theme === "dark" ? "sun" : "moon"}" aria-hidden="true"></i><span>${theme === "dark" ? "浅色模式" : "深色模式"}</span>`;
+    menuToggle.setAttribute("aria-label", theme === "dark" ? "切换浅色模式" : "切换深色模式");
+  }
   localStorage.setItem("coolweb:theme", theme);
 }
 
 $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 $("#composeTrigger").addEventListener("click", () => openComposer("feed"));
+$$("[data-header-action]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const action = button.dataset.headerAction;
+    const headerMore = $(".header-more");
+    if (headerMore) headerMore.open = false;
+    if (action === "compose") openComposer("feed");
+    if (action === "theme") applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+    if (action === "refresh") {
+      button.classList.add("loading");
+      try {
+        await route({ force: true });
+      } finally {
+        button.classList.remove("loading");
+      }
+    }
+  });
+});
 $("#composeForm").addEventListener("submit", submitComposer);
 let composeDraftTimer = null;
 $("#composeMessage").addEventListener("input", (event) => {
@@ -2590,22 +2717,43 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     return;
   }
-  if (event.key === "/" && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
+  if ((event.key === "/" || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k"))
+      && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) {
     event.preventDefault();
     $("#globalSearchInput").focus();
   }
-  if (event.key === "Escape") document.body.classList.remove("mobile-rail-open");
+  if (event.key === "Escape") {
+    document.body.classList.remove("mobile-rail-open");
+    $("#mobileMenu")?.setAttribute("aria-expanded", "false");
+    const headerMore = $(".header-more");
+    if (headerMore) headerMore.open = false;
+  }
 });
 
 async function initialize() {
+  const searchHint = $(".global-search kbd");
+  if (searchHint) searchHint.textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K";
   const preferredTheme = localStorage.getItem("coolweb:theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   applyTheme(preferredTheme);
   if (localStorage.getItem("coolweb:rail-collapsed") === "1") document.body.classList.add("rail-collapsed");
   if (!location.hash) history.replaceState(null, "", "#/home");
   const initialRoute = parseRoute().route;
   const publicRoutes = new Set(["home", "channel", "discover", "apps", "topics", "search"]);
-  const loadState = loadBaseState().catch(() => updateChrome(true));
-  if (publicRoutes.has(initialRoute)) {
+  let baseStateSettled = false;
+  const loadState = loadBaseState()
+    .catch(() => updateChrome(true))
+    .finally(() => {
+      baseStateSettled = true;
+    });
+  if (initialRoute === "home") {
+    await Promise.race([loadState, new Promise((resolve) => setTimeout(resolve, 900))]);
+    await route();
+    if (!baseStateSettled) {
+      loadState.then(() => {
+        if (parseRoute().route === "home" && state.route === "home") route();
+      });
+    }
+  } else if (publicRoutes.has(initialRoute)) {
     await Promise.all([route(), loadState]);
   } else {
     await loadState;
