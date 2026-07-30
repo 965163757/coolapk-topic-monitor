@@ -6,15 +6,16 @@
     <meta name="theme-color" content="#0f9f68" />
     <meta name="description" content="酷安第三方 Web 客户端与 AI 话题监控工作台" />
     <title>酷窗 · 酷安 Web 工作台</title>
+    <link rel="preload" href="/vendor/phosphor/regular/Phosphor.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/vendor/phosphor/regular/style.css" />
-    <link rel="stylesheet" href="/vendor/phosphor/bold/style.css" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=3.4.0" />
+    <script type="module" src="/app.js?v=3.4.0" fetchpriority="high"></script>
   </head>
   <body>
     <div class="app-shell">
       <aside class="side-rail" id="sideRail">
         <a class="brand" href="#/home" aria-label="返回首页">
-          <span class="brand-mark"><i class="ph-bold ph-lightning"></i></span>
+          <span class="brand-mark"><i class="ph ph-lightning"></i></span>
           <span><strong>酷窗</strong><small>COOLAPK WEB</small></span>
         </a>
 
@@ -59,7 +60,7 @@
 
         <main class="view-host" id="viewHost" tabindex="-1">
           <section class="page-loading" aria-label="页面加载中">
-            <span class="loading-logo"><i class="ph-bold ph-lightning"></i></span>
+            <span class="loading-logo"><i class="ph ph-lightning"></i></span>
             <h1>正在打开酷窗</h1>
             <p>同步公开内容与监控状态…</p>
           </section>
@@ -186,6 +187,5 @@
     </dialog>
 
     <div class="toast-region" id="toastRegion" aria-live="polite"></div>
-    <script type="module" src="/app.js"></script>
   </body>
 </html>

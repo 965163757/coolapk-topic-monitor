@@ -4,7 +4,18 @@
 
 服务每 5 分钟按发布时间增量采集监控话题，数据去重后写入长期归档。每个话题都可在关键词判断与 AI 判断中二选一；AI 可结合正文和图片给出 0–100% 的匹配度，达到阈值后进入飞书通知流程。
 
-当前版本：**3.3.0**
+当前版本：**3.4.0**
+
+## 3.4.0 性能更新
+
+- 图片列表按实际展示尺寸请求 WebP 缩略图，头像、卡片、Hero 与灯箱使用独立清晰度档位
+- 图片代理增加内存 LRU、持久化磁盘缓存、并发请求合并、ETag/304、过期后台刷新与容量清理
+- 首页公共数据增加 TTL、请求合并、过期继续服务和启动预热；主动刷新可使用 `refresh=1` 绕过缓存
+- 大型归档采用紧凑快照、延迟合并写和轮询批量提交，避免读请求和每个话题重复阻塞落盘
+- JS、CSS 与 JSON 自动使用 Brotli/Gzip 压缩，静态资源增加版本化长期缓存、ETag 和条件请求
+- 首页热门话题改为非阻塞加载，公共首屏状态并行读取，并增加会话级缓存
+- 首图优先加载，其他图片由 IntersectionObserver 按视口加载；离屏卡片使用 `content-visibility`
+- 移除未使用的粗体图标字体，只保留并预加载常规 WOFF2 字体
 
 ## 3.3.0 重点更新
 
@@ -55,6 +66,11 @@ npm start
 ```powershell
 $env:PORT=4173
 $env:POLL_INTERVAL_MS=300000
+$env:IMAGE_MEMORY_CACHE_BYTES=50331648
+$env:IMAGE_DISK_CACHE_BYTES=536870912
+$env:IMAGE_CACHE_FRESH_MS=604800000
+$env:IMAGE_FETCH_MAX_ACTIVE=12
+$env:IMAGE_FETCH_MAX_QUEUED=64
 $env:OPENAI_API_KEY="OPENAI_API_KEY"
 $env:OPENAI_BASE_URL="https://api.openai.com/v1"
 $env:OPENAI_MODEL="gpt-5.6-luna"
@@ -139,7 +155,7 @@ npm start
 - `GET /api/evaluations?page=1&pageSize=50&status=matched|all&topic=话题名`：按话题筛选、去重后的当前判断、分页记录与聚合统计
 - `GET /api/feeds/:id`：动态完整详情及第一页评论
 - `GET /api/feeds/:id/replies?page=2`：分页评论
-- `GET /api/image?url=图片地址`：酷安图片代理
+- `GET /api/image?url=图片地址&w=720&q=78&format=webp`：带尺寸转换、两级缓存与条件请求的酷安图片代理
 - `GET /api/search/feeds?q=关键词&sort=created_desc`：帖子搜索（远端候选、监控缓存和归档联合检索）
 - `GET /api/discovery/feeds?mode=recent|hot`：全站新鲜或热门动态
 - `GET /api/search/users?q=关键词`：用户搜索

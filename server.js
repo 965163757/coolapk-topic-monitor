@@ -2,7 +2,6 @@ import { createServer } from "node:http";
 import { createHash, randomInt } from "node:crypto";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname, extname, join, normalize } from "node:path";
-import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { BATCH_MATCH_SCHEMA, MATCH_SCHEMA, buildFeishuFeedNotification, clampThreshold, feishuSignature, maskSecret, normalizeBatchMatchResults, normalizeMatchResult, validateFeishuWebhook } from "./lib/integrations.js";
 import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monitor-source.js";
@@ -10,6 +9,11 @@ import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, infer
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
 import { aiRuleInstructions, chunkItems, matchFeedKeywords, normalizeKeywords, normalizeRuleMode, requiresNotification } from "./lib/rules.js";
 import { appSummary, collectEntities, collectionSummary, messageSummary, normalizePageTarget, notificationSummary, pageDecorations, relationshipUserSource, sessionCookieHeader, uniqueSummaries, webChannelConfig, webChannels } from "./lib/web-client.js";
+import { ImageProxyCache, etagMatches, imageContentType, isAllowedImageUrl, normalizeImageRequest, readImageBody } from "./lib/image-proxy.js";
+import { AsyncTtlCache } from "./lib/async-cache.js";
+import { createPayloadVariants, requestEtagMatches, selectPayload } from "./lib/http-delivery.js";
+import { CoalescedJsonWriter } from "./lib/coalesced-json-writer.js";
+import { BoundedTaskQueue } from "./lib/bounded-task-queue.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -23,6 +27,12 @@ const FEED_LIMIT = 20;
 const MAX_FETCH_LIMIT = 100;
 const MAX_FETCH_PAGES = 10;
 const MAX_FRONT_SCAN_PAGES = 50;
+const IMAGE_CACHE_FRESH_MS = Math.max(60_000, Number(process.env.IMAGE_CACHE_FRESH_MS) || 7 * 24 * 60 * 60 * 1000);
+const IMAGE_CACHE_STALE_MS = Math.max(IMAGE_CACHE_FRESH_MS, Number(process.env.IMAGE_CACHE_STALE_MS) || 30 * 24 * 60 * 60 * 1000);
+const IMAGE_FETCH_TIMEOUT_MS = Math.max(3_000, Number(process.env.IMAGE_FETCH_TIMEOUT_MS) || 12_000);
+const IMAGE_MAX_BYTES = Math.max(1024 * 1024, Number(process.env.IMAGE_MAX_BYTES) || 20 * 1024 * 1024);
+const IMAGE_FETCH_MAX_ACTIVE = Math.max(1, Math.min(64, Math.trunc(Number(process.env.IMAGE_FETCH_MAX_ACTIVE) || 12)));
+const IMAGE_FETCH_MAX_QUEUED = Math.max(1, Math.min(512, Math.trunc(Number(process.env.IMAGE_FETCH_MAX_QUEUED) || 64)));
 
 const APP_ID = "wx7c6be4984041fa23";
 const APP_SECRET = "a717e41f8e9254c52da78d70003f24a0";
@@ -70,6 +80,7 @@ let archive = createArchive();
 let pollPromise = null;
 let analysisPromise = null;
 let persistenceQueue = Promise.resolve();
+let archiveWriteHold = 0;
 const runtime = {
   lastAiRunAt: null,
   lastAiError: null,
@@ -81,6 +92,45 @@ const runtime = {
 };
 const topicSearchCache = new Map();
 const aiImageCapabilityCache = new Map();
+const imageProxyCache = new ImageProxyCache({
+  directory: join(ROOT, "data", "image-cache"),
+  maxMemoryBytes: Math.max(8 * 1024 * 1024, Number(process.env.IMAGE_MEMORY_CACHE_BYTES) || 48 * 1024 * 1024),
+  maxDiskBytes: Math.max(64 * 1024 * 1024, Number(process.env.IMAGE_DISK_CACHE_BYTES) || 512 * 1024 * 1024),
+});
+const imageProxyInflight = new Map();
+const imageFetchQueue = new BoundedTaskQueue({
+  maxActive: IMAGE_FETCH_MAX_ACTIVE,
+  maxQueued: IMAGE_FETCH_MAX_QUEUED,
+});
+const publicDataCache = new AsyncTtlCache({ maxEntries: 384 });
+const staticAssetCache = new Map();
+const imageProxyStats = {
+  hits: 0,
+  misses: 0,
+  stale: 0,
+  coalesced: 0,
+  errors: 0,
+  upstreamBytes: 0,
+};
+
+async function cachedPublicData(response, url, key, loader, { ttlMs = 60_000, staleMs = 5 * 60_000 } = {}) {
+  const refresh = url.searchParams.get("refresh") === "1";
+  const before = publicDataCache.status(key);
+  const startedAt = performance.now();
+  const value = await publicDataCache.get(key, loader, { ttlMs, staleMs, refresh });
+  const status = refresh
+    ? "REFRESH"
+    : before === "fresh"
+      ? "HIT"
+      : before === "stale"
+        ? "STALE"
+        : before === "pending"
+          ? "COALESCED"
+          : "MISS";
+  response.setHeader("X-Data-Cache", status);
+  response.setHeader("Server-Timing", `data;dur=${(performance.now() - startedAt).toFixed(1)};desc="${status}"`);
+  return value;
+}
 
 function md5(value) {
   return createHash("md5").update(value).digest("hex");
@@ -344,7 +394,7 @@ async function fetchWebChannel(channel = "home", page = 1) {
   const decorations = pageDecorations(raw);
   const now = new Date().toISOString();
   feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `channel:${config.key}`, topic: config.title, now }));
-  if (feeds.length) await saveArchive();
+  if (feeds.length) scheduleArchiveSave();
   return {
     channel: { key: config.key, title: config.title, description: config.description },
     page,
@@ -368,7 +418,7 @@ async function fetchWebPage(pageTarget, page = 1) {
   const decorations = pageDecorations(raw);
   const now = new Date().toISOString();
   feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `page:${target}`, topic: target, now }));
-  if (feeds.length) await saveArchive();
+  if (feeds.length) scheduleArchiveSave();
   return {
     channel: {
       key: `page:${target}`,
@@ -514,7 +564,7 @@ async function fetchFeedDetail(id, page = 1) {
       page,
     };
     archiveFeedDetail(archive, result, { page });
-    await saveArchive();
+    scheduleArchiveSave();
     return result;
   } catch (error) {
     const cached = archivedFeedDetail(archive, id);
@@ -748,7 +798,7 @@ async function searchFeeds(keyword, page = 1, sort = "dateline_desc") {
   );
   const now = new Date().toISOString();
   feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `search:${q}`, topic: "帖子搜索", now }));
-  if (feeds.length) await saveArchive();
+  if (feeds.length) scheduleArchiveSave();
   return feeds.slice(0, MAX_FETCH_LIMIT);
 }
 
@@ -775,7 +825,7 @@ async function searchUsers(keyword, page = 1) {
   const users = [...new Map([...remoteUsers, ...localUsers].map((user) => [String(user.uid), user])).values()];
   const now = new Date().toISOString();
   users.forEach((user) => archiveUser(archive, user, now));
-  if (users.length) await saveArchive();
+  if (users.length) scheduleArchiveSave();
   return [...new Map(users.map((user) => [user.uid, user])).values()].slice(0, 50);
 }
 
@@ -787,7 +837,7 @@ async function fetchDiscoveryFeeds(mode = "recent", page = 1) {
   const feeds = sortFeeds(feedItems(payload.data).map(feedSummary), sort).slice(0, MAX_FETCH_LIMIT);
   const now = new Date().toISOString();
   feeds.forEach((feed) => archiveFeed(archive, feed, { sourceKey: `discovery:${normalizedMode}`, topic: "全站发现", now }));
-  if (feeds.length) await saveArchive();
+  if (feeds.length) scheduleArchiveSave();
   return feeds;
 }
 
@@ -803,7 +853,7 @@ async function fetchUserProfile(uid, { refresh = false } = {}) {
   const profile = publicUserSummary(payload.data || {});
   if (!profile.uid) throw new Error("未找到该用户主页");
   archiveUser(archive, profile);
-  await saveArchive();
+  scheduleArchiveSave();
   return { profile, localFeeds: archivedFeedsForUser(archive, profile.uid), cached: false };
 }
 
@@ -1180,10 +1230,13 @@ async function writeJsonAtomic(file, payload) {
   await rename(temporary, file);
 }
 
-function queueJsonWrite(file, value) {
-  const payload = JSON.stringify(value, null, 2);
+function queueJsonPayload(file, payload) {
   persistenceQueue = persistenceQueue.catch(() => {}).then(() => writeJsonAtomic(file, payload));
   return persistenceQueue;
+}
+
+function queueJsonWrite(file, value) {
+  return queueJsonPayload(file, JSON.stringify(value, null, 2));
 }
 
 function saveSettings() {
@@ -1194,11 +1247,24 @@ function saveState() {
   return queueJsonWrite(STATE_FILE, state);
 }
 
+const archiveWriter = new CoalescedJsonWriter({
+  getValue: () => archive,
+  write: (payload) => queueJsonPayload(ARCHIVE_FILE, payload),
+  serialize: (value) => JSON.stringify(value),
+  delayMs: 1_500,
+  onBackgroundError: (error) => console.error("后台保存归档失败：", error.message),
+});
+
 function saveArchive() {
-  return queueJsonWrite(ARCHIVE_FILE, archive);
+  return archiveWriter.save();
+}
+
+function scheduleArchiveSave() {
+  archiveWriter.markDirty({ schedule: archiveWriteHold === 0 });
 }
 
 async function flushPersistence() {
+  await archiveWriter.flush();
   await persistenceQueue;
 }
 
@@ -1349,7 +1415,12 @@ async function testAiConnection() {
   return { ok: true, model: ai.model, provider: inferAiProvider(ai), mode: result.mode, modeLabel: aiModeLabel(result.mode), compatibilityFallback: Boolean(result.compatibilityFallback), response: response.slice(0, 100) };
 }
 
-async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inputFeeds = null } = {}) {
+async function analyzeTopicFeeds(tag, {
+  force = false,
+  notify = true,
+  feeds: inputFeeds = null,
+  persist = true,
+} = {}) {
   if (analysisPromise) throw new Error("已有 AI 分析任务正在运行");
   const task = (async () => {
     const topic = state.topics.find((item) => item.tag === tag);
@@ -1553,7 +1624,7 @@ async function analyzeTopicFeeds(tag, { force = false, notify = true, feeds: inp
     archive.evaluations = archive.evaluations.slice(0, normalizeRetention(settings.retention).maxEvaluations);
     topic.ai.lastAnalyzedAt = new Date().toISOString();
     runtime.lastAiRunAt = topic.ai.lastAnalyzedAt;
-    await Promise.all([saveState(), saveArchive(), saveSettings()]);
+    if (persist) await Promise.all([saveState(), saveArchive(), saveSettings()]);
     return results;
   })();
   analysisPromise = task;
@@ -1654,7 +1725,7 @@ async function loadArchive() {
   await Promise.all([saveState(), saveSettings(), saveArchive()]);
 }
 
-async function refreshTopic(tag) {
+async function refreshTopic(tag, { persist = true } = {}) {
   const index = state.topics.findIndex((topic) => topic.tag === tag);
   if (index < 0) throw new Error("该话题未被监控");
   const now = new Date().toISOString();
@@ -1706,12 +1777,12 @@ async function refreshTopic(tag) {
     });
     throw error;
   } finally {
-    await Promise.all([saveState(), saveArchive()]);
+    if (persist) await Promise.all([saveState(), saveArchive()]);
   }
   return { topic: state.topics[index], discoveredFeeds: refreshedFeeds };
 }
 
-async function runMaintenance({ force = false } = {}) {
+async function runMaintenance({ force = false, persist = true } = {}) {
   const retention = normalizeRetention(settings.retention);
   const previous = new Date(archive.maintenance?.lastCleanupAt || 0).getTime();
   if (!force && previous && Date.now() - previous < retention.cleanupIntervalHours * 3_600_000) {
@@ -1725,45 +1796,61 @@ async function runMaintenance({ force = false } = {}) {
     message: `定时清理完成：移除 ${summary.removed.feeds + summary.removed.evaluations + summary.removed.users + summary.removed.events} 条过期数据`,
     createdAt: summary.ranAt,
   });
-  await saveArchive();
+  if (persist) await saveArchive();
   return { skipped: false, ...summary };
 }
 
 async function pollAll() {
   if (pollPromise) return pollPromise;
   pollPromise = (async () => {
+    archiveWriteHold += 1;
+    archiveWriter.defer();
     state.lastPollAt = new Date().toISOString();
     state.nextPollAt = new Date(Date.now() + POLL_INTERVAL_MS).toISOString();
-    const tags = state.topics.map((topic) => topic.tag);
-    const analysisBatches = [];
-    for (const tag of tags) {
-      let discoveredFeeds = [];
-      try {
-        const refresh = await refreshTopic(tag);
-        discoveredFeeds = refresh.discoveredFeeds;
-      } catch (error) {
-        console.error(`刷新“${tag}”失败：`, error.message);
+    try {
+      const tags = state.topics.map((topic) => topic.tag);
+      const analysisBatches = [];
+      for (const tag of tags) {
+        let discoveredFeeds = [];
+        try {
+          const refresh = await refreshTopic(tag, { persist: false });
+          discoveredFeeds = refresh.discoveredFeeds;
+        } catch (error) {
+          console.error(`刷新“${tag}”失败：`, error.message);
+        }
+        const topic = state.topics.find((item) => item.tag === tag);
+        if (topicHasRules(topic)) {
+          const retryFeeds = latestEvaluations(archive.evaluations)
+            .filter((item) => item.topic === tag && (
+              item.status === "error"
+              || item.notificationError
+              || requiresNotification(item, topic, settings.feishu.enabled)
+            ))
+            .filter((item) => !item.nextRetryAt || new Date(item.nextRetryAt).getTime() <= Date.now())
+            .map((item) => archive.feeds[String(item.feedId)])
+            .filter(Boolean);
+          const feeds = [...new Map([...discoveredFeeds, ...retryFeeds].map((feed) => [String(feed.id), feed])).values()];
+          if (feeds.length) analysisBatches.push({ tag, feeds });
+        }
       }
-      const topic = state.topics.find((item) => item.tag === tag);
-      if (topicHasRules(topic)) {
-        const retryFeeds = latestEvaluations(archive.evaluations)
-          .filter((item) => item.topic === tag && (
-            item.status === "error"
-            || item.notificationError
-            || requiresNotification(item, topic, settings.feishu.enabled)
-          ))
-          .filter((item) => !item.nextRetryAt || new Date(item.nextRetryAt).getTime() <= Date.now())
-          .map((item) => archive.feeds[String(item.feedId)])
-          .filter(Boolean);
-        const feeds = [...new Map([...discoveredFeeds, ...retryFeeds].map((feed) => [String(feed.id), feed])).values()];
-        if (feeds.length) analysisBatches.push({ tag, feeds });
+      for (const batch of analysisBatches) {
+        try {
+          await analyzeTopicFeeds(batch.tag, {
+            force: false,
+            notify: true,
+            feeds: batch.feeds,
+            persist: false,
+          });
+        } catch (error) {
+          runtime.lastAiError = error.message;
+          console.error(`AI 分析“${batch.tag}”失败：`, error.message);
+        }
       }
+      await runMaintenance({ persist: false });
+    } finally {
+      archiveWriteHold = Math.max(0, archiveWriteHold - 1);
+      await Promise.all([saveState(), saveSettings(), saveArchive()]);
     }
-    for (const batch of analysisBatches) {
-      try { await analyzeTopicFeeds(batch.tag, { force: false, notify: true, feeds: batch.feeds }); }
-      catch (error) { runtime.lastAiError = error.message; console.error(`AI 分析“${batch.tag}”失败：`, error.message); }
-    }
-    await Promise.all([saveState(), runMaintenance()]);
   })().finally(() => {
     pollPromise = null;
   });
@@ -1771,11 +1858,18 @@ async function pollAll() {
 }
 
 function sendJson(response, status, body) {
-  response.writeHead(status, {
+  const payload = createPayloadVariants(JSON.stringify(body), "application/json; charset=utf-8");
+  const selected = selectPayload(payload, response.requestAcceptEncoding || "");
+  const headers = {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
-  });
-  response.end(JSON.stringify(body));
+    "Content-Length": String(selected.body.byteLength),
+    Vary: "Accept-Encoding",
+    "X-Content-Type-Options": "nosniff",
+  };
+  if (selected.encoding !== "identity") headers["Content-Encoding"] = selected.encoding;
+  response.writeHead(status, headers);
+  response.end(response.requestMethod === "HEAD" ? undefined : selected.body);
 }
 
 async function readJson(request, maxBytes = 32_000) {
@@ -1787,23 +1881,61 @@ async function readJson(request, maxBytes = 32_000) {
   return body ? JSON.parse(body) : {};
 }
 
-async function serveStatic(pathname, response) {
-  const requested = pathname === "/" ? "index.html" : pathname.slice(1);
+async function serveStatic(url, request, response) {
+  if (!["GET", "HEAD"].includes(request.method)) return false;
+  const requested = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
   if (/^qa-.*\.png$/i.test(requested)) return false;
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "");
   const path = join(PUBLIC_DIR, safePath);
   if (!path.startsWith(PUBLIC_DIR)) return false;
   try {
-    const body = await readFile(path);
     const types = {
       ".html": "text/html; charset=utf-8",
       ".css": "text/css; charset=utf-8",
       ".js": "text/javascript; charset=utf-8",
+      ".json": "application/json; charset=utf-8",
       ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".webp": "image/webp",
+      ".svg": "image/svg+xml",
       ".ico": "image/x-icon",
+      ".woff": "font/woff",
+      ".woff2": "font/woff2",
+      ".ttf": "font/ttf",
     };
-    response.writeHead(200, { "Content-Type": types[extname(path)] || "application/octet-stream" });
-    response.end(body);
+    const contentType = types[extname(path).toLowerCase()] || "application/octet-stream";
+    let payload = staticAssetCache.get(path);
+    if (!payload) {
+      payload = createPayloadVariants(await readFile(path), contentType);
+      staticAssetCache.set(path, payload);
+    }
+    const selected = selectPayload(payload, request.headers["accept-encoding"] || "");
+    const versioned = url.searchParams.has("v");
+    const immutableVendor = safePath.startsWith(`vendor${process.platform === "win32" ? "\\" : "/"}`);
+    const isHtml = extname(path).toLowerCase() === ".html";
+    const cacheControl = isHtml
+      ? "no-cache, max-age=0, must-revalidate"
+      : versioned || immutableVendor
+        ? "public, max-age=31536000, immutable"
+        : "public, max-age=3600, stale-while-revalidate=86400";
+    const headers = {
+      "Content-Type": contentType,
+      "Content-Length": String(selected.body.byteLength),
+      "Cache-Control": cacheControl,
+      ETag: payload.etag,
+      Vary: "Accept-Encoding",
+      "X-Content-Type-Options": "nosniff",
+    };
+    if (selected.encoding !== "identity") headers["Content-Encoding"] = selected.encoding;
+    if (requestEtagMatches(request.headers["if-none-match"], payload.etag)) {
+      delete headers["Content-Length"];
+      response.writeHead(304, headers);
+      response.end();
+      return true;
+    }
+    response.writeHead(200, headers);
+    response.end(request.method === "HEAD" ? undefined : selected.body);
     return true;
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
@@ -1811,52 +1943,189 @@ async function serveStatic(pathname, response) {
   }
 }
 
-async function proxyImage(url, response) {
-  let source;
-  try {
-    source = new URL(url);
-  } catch {
-    return sendJson(response, 400, { error: "图片地址格式错误" });
+async function fetchImageResponse(url, headers, signal) {
+  let target = new URL(url);
+  for (let redirectCount = 0; redirectCount <= 3; redirectCount += 1) {
+    if (!isAllowedImageUrl(target)) {
+      throw Object.assign(new Error("图片重定向到了未允许的来源"), { statusCode: 502 });
+    }
+    const upstream = await fetch(target, {
+      headers,
+      redirect: "manual",
+      signal,
+    });
+    if (![301, 302, 303, 307, 308].includes(upstream.status)) return upstream;
+    const location = upstream.headers.get("location");
+    await upstream.body?.cancel().catch(() => {});
+    if (!location) throw Object.assign(new Error("图片重定向缺少地址"), { statusCode: 502 });
+    target = new URL(location, target);
   }
-  const hostname = source.hostname.toLowerCase();
-  if (!["image.coolapk.com", "avatar.coolapk.com", "pp.myapp.com", "static.coolapk.com"].includes(hostname)) {
-    return sendJson(response, 403, { error: "图片来源未被允许" });
-  }
-  if (!/^https?:$/.test(source.protocol)) return sendJson(response, 400, { error: "图片协议错误" });
+  throw Object.assign(new Error("图片重定向次数过多"), { statusCode: 502 });
+}
 
-  // 部分旧图片只在 HTTP 源上可用，因此保留原始协议并由本站统一代理。
-  const upstream = await fetch(source, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
-      Referer: "https://www.coolapk.com/",
-      Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-    },
-    redirect: "follow",
-    signal: AbortSignal.timeout(20_000),
+async function fetchAndCacheImage(prepared, staleEntry = null) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("图片上游请求超时")), IMAGE_FETCH_TIMEOUT_MS);
+  timeout.unref();
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+    Referer: "https://www.coolapk.com/",
+    Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+  };
+  if (staleEntry?.upstreamEtag) headers["If-None-Match"] = staleEntry.upstreamEtag;
+  if (staleEntry?.lastModified) headers["If-Modified-Since"] = staleEntry.lastModified;
+
+  try {
+    let requestedUrl = prepared.upstreamUrl;
+    let upstream = await fetchImageResponse(requestedUrl, headers, controller.signal);
+    // A small number of legacy GIF/JPEG objects cannot be transformed by OSS.
+    // Preserve availability by transparently falling back to the original.
+    if (prepared.optimized && upstream.status !== 304 && !upstream.ok) {
+      await upstream.body?.cancel().catch(() => {});
+      requestedUrl = prepared.sourceUrl;
+      upstream = await fetchImageResponse(requestedUrl, headers, controller.signal);
+    }
+    if (upstream.status === 304 && staleEntry) {
+      const now = Date.now();
+      const refreshed = {
+        ...staleEntry,
+        createdAt: now,
+        freshUntil: now + IMAGE_CACHE_FRESH_MS,
+        staleUntil: now + IMAGE_CACHE_STALE_MS,
+      };
+      await imageProxyCache.set(prepared.cacheKey, refreshed).catch((error) => {
+        console.warn(`更新图片缓存时间失败：${error.message}`);
+      });
+      return refreshed;
+    }
+    if (!upstream.ok || !upstream.body) {
+      throw Object.assign(new Error(`图片加载失败（HTTP ${upstream.status}）`), { statusCode: 502 });
+    }
+    const declaredBytes = Number(upstream.headers.get("content-length"));
+    if (Number.isFinite(declaredBytes) && declaredBytes > IMAGE_MAX_BYTES) {
+      await upstream.body.cancel().catch(() => {});
+      throw Object.assign(new Error("上游图片体积过大"), { statusCode: 502 });
+    }
+    const body = await readImageBody(upstream.body, IMAGE_MAX_BYTES);
+    const contentType = imageContentType(body, upstream.headers.get("content-type"));
+    if (!contentType) throw Object.assign(new Error("上游返回的内容不是受支持的图片"), { statusCode: 502 });
+    const now = Date.now();
+    const entry = {
+      body,
+      contentType,
+      etag: `"sha256-${createHash("sha256").update(body).digest("base64url").slice(0, 32)}"`,
+      upstreamEtag: upstream.headers.get("etag") || "",
+      lastModified: upstream.headers.get("last-modified") || "",
+      createdAt: now,
+      freshUntil: now + IMAGE_CACHE_FRESH_MS,
+      staleUntil: now + IMAGE_CACHE_STALE_MS,
+      upstreamUrl: requestedUrl,
+    };
+    imageProxyStats.upstreamBytes += body.byteLength;
+    await imageProxyCache.set(prepared.cacheKey, entry).catch((error) => {
+      console.warn(`写入图片缓存失败：${error.message}`);
+    });
+    return entry;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function sharedImageFetch(prepared, staleEntry = null) {
+  const existing = imageProxyInflight.get(prepared.cacheKey);
+  if (existing) return { promise: existing, coalesced: true };
+  const promise = imageFetchQueue.run(() => fetchAndCacheImage(prepared, staleEntry)).finally(() => {
+    imageProxyInflight.delete(prepared.cacheKey);
   });
-  if (!upstream.ok || !upstream.body) return sendJson(response, 502, { error: `图片加载失败（${upstream.status}）` });
-  response.writeHead(200, {
-    "Content-Type": upstream.headers.get("content-type") || "image/jpeg",
-    "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+  // Background stale refreshes may not have a caller awaiting them.
+  promise.catch((error) => {
+    if (error?.statusCode !== 429) {
+      imageProxyStats.errors += 1;
+      console.warn(`刷新图片缓存失败：${error.message}`);
+    }
+  });
+  imageProxyInflight.set(prepared.cacheKey, promise);
+  return { promise, coalesced: false };
+}
+
+function sendImage(request, response, entry, cacheStatus, startedAt) {
+  const age = Math.max(0, Math.floor((Date.now() - entry.createdAt) / 1000));
+  const headers = {
+    "Content-Type": entry.contentType,
+    "Content-Length": String(entry.body.byteLength),
+    "Cache-Control": "public, max-age=604800, stale-while-revalidate=2592000, immutable",
+    ETag: entry.etag,
+    Age: String(age),
     "X-Content-Type-Options": "nosniff",
+    "X-Image-Cache": cacheStatus,
+    "Server-Timing": `image;dur=${(performance.now() - startedAt).toFixed(1)};desc="${cacheStatus}"`,
+    "Timing-Allow-Origin": "*",
+  };
+  if (entry.lastModified) headers["Last-Modified"] = entry.lastModified;
+  if (etagMatches(request.headers["if-none-match"], entry.etag)) {
+    delete headers["Content-Length"];
+    response.writeHead(304, headers);
+    return response.end();
+  }
+  response.writeHead(200, headers);
+  return response.end(request.method === "HEAD" ? undefined : entry.body);
+}
+
+async function proxyImage(request, response, url) {
+  const startedAt = performance.now();
+  const prepared = normalizeImageRequest(url.searchParams.get("url") || "", {
+    width: url.searchParams.get("w"),
+    quality: url.searchParams.get("q"),
+    format: url.searchParams.get("format"),
   });
-  const stream = Readable.fromWeb(upstream.body);
-  stream.on("error", (error) => {
-    console.warn(`图片代理流中断：${error.message}`);
-    if (!response.destroyed) response.destroy();
-  });
-  response.on("close", () => {
-    if (!stream.destroyed) stream.destroy();
-  });
-  stream.pipe(response);
+  const cached = await imageProxyCache.get(prepared.cacheKey);
+  if (cached?.freshUntil > Date.now()) {
+    imageProxyStats.hits += 1;
+    return sendImage(request, response, cached, cached.cacheLayer === "memory" ? "HIT" : "DISK", startedAt);
+  }
+  if (cached) {
+    imageProxyStats.stale += 1;
+    sharedImageFetch(prepared, cached);
+    return sendImage(request, response, cached, "STALE", startedAt);
+  }
+
+  const fetch = sharedImageFetch(prepared);
+  if (fetch.coalesced) imageProxyStats.coalesced += 1;
+  else imageProxyStats.misses += 1;
+  let entry;
+  try {
+    entry = await fetch.promise;
+  } catch (error) {
+    if (error?.statusCode === 429) {
+      response.setHeader("Retry-After", String(error.retryAfterSeconds || 1));
+      response.setHeader("X-Image-Queue", "FULL");
+    }
+    throw error;
+  }
+  return sendImage(request, response, entry, fetch.coalesced ? "COALESCED" : "MISS", startedAt);
 }
 
 async function handleApi(request, response, url) {
-  if (request.method === "GET" && url.pathname === "/api/image") {
-    return proxyImage(url.searchParams.get("url") || "", response);
+  if (["GET", "HEAD"].includes(request.method) && url.pathname === "/api/image") {
+    return proxyImage(request, response, url);
   }
   if (request.method === "GET" && url.pathname === "/api/health") {
-    return sendJson(response, 200, { ok: true, uptimeSeconds: Math.round(process.uptime()), topics: state.topics.length, archive: archiveSummary(archive), now: new Date().toISOString() });
+    return sendJson(response, 200, {
+      ok: true,
+      uptimeSeconds: Math.round(process.uptime()),
+      topics: state.topics.length,
+      archive: archiveSummary(archive),
+      imageProxy: {
+        ...imageProxyStats,
+        ...imageProxyCache.stats(),
+        inflight: imageProxyInflight.size,
+        fetchQueue: imageFetchQueue.stats(),
+      },
+      publicDataCache: publicDataCache.stats(),
+      staticAssets: { cached: staticAssetCache.size },
+      persistence: { archive: archiveWriter.stats() },
+      now: new Date().toISOString(),
+    });
   }
   if (request.method === "GET" && url.pathname === "/api/status") {
     return sendJson(response, 200, {
@@ -1884,9 +2153,9 @@ async function handleApi(request, response, url) {
     };
     try {
       const result = await checkCoolapkSession();
-      await Promise.all([saveSettings(), saveArchive()]);
       appendArchiveEvent(archive, { type: "account_connected", level: "success", message: `已连接酷安账号：${settings.coolapk.username}` });
-      await saveArchive();
+      await Promise.all([saveSettings(), saveArchive()]);
+      publicDataCache.clear();
       return sendJson(response, 200, result);
     } catch (error) {
       settings.coolapk = previous;
@@ -1900,6 +2169,7 @@ async function handleApi(request, response, url) {
     runtime.accountValid = false;
     runtime.accountError = null;
     await saveSettings();
+    publicDataCache.clear();
     return sendJson(response, 200, { account: publicAccount() });
   }
   if (request.method === "POST" && url.pathname === "/api/account/test") {
@@ -1985,36 +2255,70 @@ async function handleApi(request, response, url) {
     const channel = String(url.searchParams.get("channel") || "home").trim();
     if (!webChannelConfig(channel)) return sendJson(response, 404, { error: "不支持该内容频道" });
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
-    return sendJson(response, 200, await fetchWebChannel(channel, page));
+    const ttlMs = channel === "home" ? 60_000 : channel === "topics" ? 3 * 60_000 : 90_000;
+    const data = await cachedPublicData(
+      response,
+      url,
+      `channel:${channel}:${page}`,
+      () => fetchWebChannel(channel, page),
+      { ttlMs, staleMs: 5 * 60_000 },
+    );
+    return sendJson(response, 200, data);
   }
   if (request.method === "GET" && url.pathname === "/api/web/page") {
     const source = String(url.searchParams.get("source") || "").trim();
-    if (!normalizePageTarget(source)) return sendJson(response, 400, { error: "页面标识无效" });
+    const target = normalizePageTarget(source);
+    if (!target) return sendJson(response, 400, { error: "页面标识无效" });
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
-    return sendJson(response, 200, await fetchWebPage(source, page));
+    const data = await cachedPublicData(
+      response,
+      url,
+      `page:${target}:${page}`,
+      () => fetchWebPage(target, page),
+      { ttlMs: 2 * 60_000, staleMs: 10 * 60_000 },
+    );
+    return sendJson(response, 200, data);
   }
   if (request.method === "GET" && url.pathname === "/api/search/all") {
     const q = String(url.searchParams.get("q") || "").trim();
     if (!q) return sendJson(response, 400, { error: "请输入搜索关键词" });
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
-    const [feeds, users, topics, apps] = await Promise.all([
-      searchFeeds(q, page).catch(() => []),
-      searchUsers(q, page).catch(() => []),
-      searchTopics(q).catch(() => []),
-      searchApps(q, page).catch(() => []),
-    ]);
-    return sendJson(response, 200, { q, page, feeds, users, topics, apps });
+    const data = await cachedPublicData(response, url, `search:${q.toLocaleLowerCase("zh-CN")}:${page}`, async () => {
+      const [feeds, users, topics, apps] = await Promise.all([
+        searchFeeds(q, page).catch(() => []),
+        searchUsers(q, page).catch(() => []),
+        searchTopics(q).catch(() => []),
+        searchApps(q, page).catch(() => []),
+      ]);
+      return { q, page, feeds, users, topics, apps };
+    }, { ttlMs: 2 * 60_000, staleMs: 5 * 60_000 });
+    return sendJson(response, 200, data);
   }
   const appMatch = url.pathname.match(/^\/api\/apps\/(\d+)$/);
   if (appMatch && request.method === "GET") {
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
-    return sendJson(response, 200, await fetchAppDetail(appMatch[1], page));
+    const data = await cachedPublicData(
+      response,
+      url,
+      `app:${appMatch[1]}:${page}`,
+      () => fetchAppDetail(appMatch[1], page),
+      { ttlMs: 5 * 60_000, staleMs: 30 * 60_000 },
+    );
+    return sendJson(response, 200, data);
   }
   const publicTopicMatch = url.pathname.match(/^\/api\/web\/topics\/(.+)$/);
   if (publicTopicMatch && request.method === "GET") {
     const page = Math.max(1, Math.min(50, Number(url.searchParams.get("page") || 1)));
     const sort = normalizeFetchSort(url.searchParams.get("sort") || "dateline_desc");
-    return sendJson(response, 200, await fetchPublicTopic(decodeURIComponent(publicTopicMatch[1]), page, sort));
+    const source = decodeURIComponent(publicTopicMatch[1]);
+    const data = await cachedPublicData(
+      response,
+      url,
+      `topic:${source}:${sort}:${page}`,
+      () => fetchPublicTopic(source, page, sort),
+      { ttlMs: 60_000, staleMs: 5 * 60_000 },
+    );
+    return sendJson(response, 200, data);
   }
   if (request.method === "GET" && url.pathname === "/api/settings") {
     return sendJson(response, 200, publicSettings());
@@ -2248,7 +2552,7 @@ async function handleApi(request, response, url) {
     const record = archive.feeds[repliesMatch[1]];
     if (record && page === 1) {
       record.detail = { ...(record.detail || {}), replies, page, savedAt: new Date().toISOString() };
-      await saveArchive();
+      scheduleArchiveSave();
     }
     return sendJson(response, 200, { replies, page });
   }
@@ -2356,9 +2660,11 @@ async function handleApi(request, response, url) {
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+  response.requestAcceptEncoding = request.headers["accept-encoding"] || "";
+  response.requestMethod = request.method;
   try {
     if (url.pathname.startsWith("/api/")) return await handleApi(request, response, url);
-    if (!(await serveStatic(url.pathname, response))) sendJson(response, 404, { error: "页面不存在" });
+    if (!(await serveStatic(url, request, response))) sendJson(response, 404, { error: "页面不存在" });
   } catch (error) {
     console.error(error);
     sendJson(response, Number(error.statusCode) || 500, { error: error.message || "服务器错误" });
@@ -2372,16 +2678,32 @@ state.nextPollAt = new Date(Date.now() + POLL_INTERVAL_MS).toISOString();
 server.listen(PORT, HOST, () => {
   console.log(`酷安话题监控已启动：http://${HOST}:${PORT}`);
   void pollAll();
+  const prewarmTimer = setTimeout(() => {
+    void Promise.allSettled([
+      publicDataCache.get("channel:home:1", () => fetchWebChannel("home", 1), { ttlMs: 60_000, staleMs: 5 * 60_000 }),
+      publicDataCache.get("channel:topics:1", () => fetchWebChannel("topics", 1), { ttlMs: 3 * 60_000, staleMs: 5 * 60_000 }),
+    ]);
+  }, 2_000);
+  prewarmTimer.unref();
 });
 
 const timer = setInterval(() => void pollAll(), POLL_INTERVAL_MS);
 timer.unref();
+void imageProxyCache.prune().catch((error) => console.warn(`清理图片缓存失败：${error.message}`));
+const imageCacheTimer = setInterval(
+  () => void imageProxyCache.prune().catch((error) => console.warn(`清理图片缓存失败：${error.message}`)),
+  6 * 60 * 60 * 1000,
+);
+imageCacheTimer.unref();
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
     clearInterval(timer);
+    clearInterval(imageCacheTimer);
     server.close(() => {
       void (async () => {
+        const activeWork = [...new Set([pollPromise, analysisPromise].filter(Boolean))];
+        if (activeWork.length) await Promise.allSettled(activeWork);
         await Promise.all([saveState(), saveSettings(), saveArchive()]);
         await flushPersistence();
         process.exit(0);

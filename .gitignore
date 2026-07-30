@@ -4,6 +4,7 @@ data/settings.json
 data/settings.json.tmp
 data/archive.json
 data/archive.json.tmp
+data/image-cache/
 node_modules/
 .env
 .env.*
