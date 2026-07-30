@@ -135,13 +135,14 @@ function safeUrl(value = "") {
   }
 }
 
-function imageUrl(value = "", { width = 0, quality = 0, format = "" } = {}) {
+function imageUrl(value = "", { width = 0, quality = 0, format = "", origin = false } = {}) {
   const url = safeUrl(value);
   if (!url) return "";
   const params = new URLSearchParams({ url });
   if (Number(width) > 0) params.set("w", String(Math.round(Number(width))));
   if (Number(quality) > 0) params.set("q", String(Math.round(Number(quality))));
   if (format) params.set("format", String(format));
+  if (origin) params.set("__origin", "1");
   return `/api/image?${params}`;
 }
 
@@ -153,10 +154,22 @@ function imageMarkup(value, {
   priority = false,
   carousel = false,
 } = {}) {
-  const src = imageUrl(value, { width, quality, format: "webp" });
+  const variant = { width, quality, format: "webp" };
+  const src = imageUrl(value, variant);
   if (!src) return "";
+  const originFallback = imageUrl(value, { ...variant, origin: true });
   const sourceAttribute = priority ? "src" : carousel ? "data-carousel-src" : "data-lazy-src";
-  return `<img${className ? ` class="${escapeHtml(className)}"` : ""} ${sourceAttribute}="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="${priority ? "eager" : "lazy"}" decoding="async" fetchpriority="${priority ? "high" : "low"}" />`;
+  return `<img${className ? ` class="${escapeHtml(className)}"` : ""} ${sourceAttribute}="${escapeHtml(src)}" data-image-origin-fallback="${escapeHtml(originFallback)}" alt="${escapeHtml(alt)}" loading="${priority ? "eager" : "lazy"}" decoding="async" fetchpriority="${priority ? "high" : "low"}" />`;
+}
+
+function retryImageAtOrigin(image) {
+  const fallback = image?.dataset?.imageOriginFallback;
+  if (!fallback || image.dataset.imageOriginRetried === "1") return false;
+  image.dataset.imageOriginRetried = "1";
+  image.style.visibility = "visible";
+  image.classList.remove("image-ready");
+  image.src = fallback;
+  return true;
 }
 
 const lazyImageObserver = "IntersectionObserver" in window
@@ -1758,6 +1771,42 @@ function lightboxGallery(url, trigger) {
   return [...new Set(values.map(String).map((item) => safeUrl(item)).filter(Boolean))];
 }
 
+function cssPixels(value) {
+  const number = Number.parseFloat(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function syncLightboxFit() {
+  const style = getComputedStyle(lightboxStage);
+  const width = Math.max(
+    1,
+    lightboxStage.clientWidth - cssPixels(style.paddingLeft) - cssPixels(style.paddingRight),
+  );
+  const height = Math.max(
+    1,
+    lightboxStage.clientHeight - cssPixels(style.paddingTop) - cssPixels(style.paddingBottom),
+  );
+  state.lightbox.fitWidth = width;
+  state.lightbox.fitHeight = height;
+  lightboxImage.style.setProperty("--lightbox-fit-width", `${width}px`);
+  lightboxImage.style.setProperty("--lightbox-fit-height", `${height}px`);
+  return { width, height };
+}
+
+function preferredLightboxWidth() {
+  const { width } = syncLightboxFit();
+  const desired = width * Math.min(2, Math.max(1, Number(window.devicePixelRatio) || 1));
+  return [960, 1280, 1600, 1920].find((candidate) => candidate >= desired) || 1920;
+}
+
+function lightboxSourceVariant(original, width) {
+  const variant = { width, quality: width >= 1920 ? 88 : 84, format: "webp" };
+  return {
+    src: imageUrl(original, variant),
+    originFallback: imageUrl(original, { ...variant, origin: true }),
+  };
+}
+
 function resetLightboxTransform() {
   state.lightbox.zoom = 1;
   state.lightbox.x = 0;
@@ -1785,7 +1834,10 @@ function loadLightboxImage(index = state.lightbox.index) {
   item.index = (Number(index) + item.sources.length) % item.sources.length;
   resetLightboxTransform();
   const original = item.sources[item.index];
-  const src = imageUrl(original, { width: 1920, quality: 88, format: "webp" });
+  item.requestWidth = preferredLightboxWidth();
+  item.upgrading = false;
+  item.upgradeToken = Symbol("lightbox-image");
+  const { src, originFallback } = lightboxSourceVariant(original, item.requestWidth);
   $("#lightboxCounter").textContent = `${item.index + 1} / ${item.sources.length}`;
   $("#lightboxOriginal").href = safeUrl(original) || src;
   $("#lightboxPrevious").disabled = item.sources.length <= 1;
@@ -1794,7 +1846,10 @@ function loadLightboxImage(index = state.lightbox.index) {
   $("#lightboxError").hidden = true;
   lightboxImage.classList.remove("ready");
   lightboxImage.style.visibility = "visible";
+  lightboxImage.dataset.imageOriginFallback = originFallback;
+  delete lightboxImage.dataset.imageOriginRetried;
   lightboxImage.alt = `${item.caption}，第 ${item.index + 1} 张`;
+  syncLightboxFit();
   lightboxImage.src = src;
   renderLightboxThumbs();
   updateLightbox();
@@ -1819,9 +1874,15 @@ function openLightbox(url, caption = "查看图片", trigger = null) {
     pointers: new Map(),
     pinchDistance: 0,
     pinchZoom: 1,
+    fitWidth: 1,
+    fitHeight: 1,
+    requestWidth: 960,
+    upgrading: false,
+    upgradeToken: null,
   };
   $("#lightboxCaption").textContent = state.lightbox.caption;
   showDialog(lightbox);
+  syncLightboxFit();
   loadLightboxImage(state.lightbox.index);
 }
 
@@ -1832,8 +1893,10 @@ function clampLightboxPan() {
     item.y = 0;
     return;
   }
-  const maxX = Math.max(0, (lightboxImage.clientWidth * item.zoom - lightboxStage.clientWidth) / 2 + 28);
-  const maxY = Math.max(0, (lightboxImage.clientHeight * item.zoom - lightboxStage.clientHeight) / 2 + 28);
+  const viewportWidth = Math.max(1, Number(item.fitWidth) || lightboxStage.clientWidth);
+  const viewportHeight = Math.max(1, Number(item.fitHeight) || lightboxStage.clientHeight);
+  const maxX = Math.max(0, (lightboxImage.clientWidth * item.zoom - viewportWidth) / 2);
+  const maxY = Math.max(0, (lightboxImage.clientHeight * item.zoom - viewportHeight) / 2);
   item.x = Math.max(-maxX, Math.min(maxX, item.x));
   item.y = Math.max(-maxY, Math.min(maxY, item.y));
 }
@@ -1848,6 +1911,46 @@ function updateLightbox() {
   lightboxStage.classList.toggle("zoomed", item.zoom > 1);
 }
 
+function upgradeLightboxImageIfNeeded() {
+  const item = state.lightbox;
+  if (item.zoom < 1.4 || item.requestWidth >= 1920 || item.upgrading || !item.sources.length) return;
+  item.upgrading = true;
+  const index = item.index;
+  const token = Symbol("lightbox-upgrade");
+  item.upgradeToken = token;
+  const original = item.sources[item.index];
+  const { src, originFallback } = lightboxSourceVariant(original, 1920);
+  const candidate = new Image();
+  candidate.decoding = "async";
+  const applyUpgrade = (selectedSrc, usedOriginFallback = false) => {
+    if (!lightbox.open || state.lightbox.upgradeToken !== token || state.lightbox.index !== index) return;
+    state.lightbox.upgrading = false;
+    if (state.lightbox.zoom < 1.4) return;
+    state.lightbox.requestWidth = 1920;
+    lightboxImage.dataset.imageOriginFallback = originFallback;
+    if (usedOriginFallback) lightboxImage.dataset.imageOriginRetried = "1";
+    else delete lightboxImage.dataset.imageOriginRetried;
+    lightboxImage.src = selectedSrc;
+  };
+  candidate.addEventListener("load", () => applyUpgrade(candidate.src, candidate.src.includes("__origin=1")), { once: true });
+  candidate.addEventListener("error", () => {
+    const stillRelevant = lightbox.open
+      && state.lightbox.upgradeToken === token
+      && state.lightbox.index === index
+      && state.lightbox.zoom >= 1.4;
+    if (!stillRelevant) {
+      if (state.lightbox.upgradeToken === token) state.lightbox.upgrading = false;
+      return;
+    }
+    if (candidate.src.includes("__origin=1")) {
+      if (state.lightbox.upgradeToken === token) state.lightbox.upgrading = false;
+      return;
+    }
+    candidate.src = originFallback;
+  });
+  candidate.src = src;
+}
+
 function setZoom(value) {
   state.lightbox.zoom = Math.max(1, Math.min(5, Number(value) || 1));
   if (state.lightbox.zoom === 1) {
@@ -1855,6 +1958,7 @@ function setZoom(value) {
     state.lightbox.y = 0;
   }
   updateLightbox();
+  upgradeLightboxImageIfNeeded();
 }
 
 function stepLightbox(direction) {
@@ -2359,23 +2463,22 @@ $("#zoomReset").addEventListener("click", () => setZoom(1));
 $("#lightboxPrevious").addEventListener("click", () => stepLightbox(-1));
 $("#lightboxNext").addEventListener("click", () => stepLightbox(1));
 $("#lightboxRetry").addEventListener("click", () => {
-  const src = lightboxImage.src;
-  lightboxImage.src = "";
-  requestAnimationFrame(() => {
-    $("#lightboxLoading").hidden = false;
-    $("#lightboxError").hidden = true;
-    lightboxImage.style.visibility = "visible";
-    lightboxImage.src = src;
-  });
+  loadLightboxImage(state.lightbox.index);
 });
 lightboxImage.addEventListener("load", () => {
   $("#lightboxLoading").hidden = true;
   $("#lightboxError").hidden = true;
   lightboxImage.style.visibility = "visible";
   lightboxImage.classList.add("ready");
+  syncLightboxFit();
   updateLightbox();
 });
 lightboxImage.addEventListener("error", () => {
+  if (retryImageAtOrigin(lightboxImage)) {
+    $("#lightboxLoading").hidden = false;
+    $("#lightboxError").hidden = true;
+    return;
+  }
   $("#lightboxLoading").hidden = true;
   $("#lightboxError").hidden = false;
   lightboxImage.classList.remove("ready");
@@ -2458,6 +2561,7 @@ lightboxStage.addEventListener("dblclick", () => setZoom(state.lightbox.zoom ===
 
 document.addEventListener("error", (event) => {
   if (event.target instanceof HTMLImageElement) {
+    if (event.target === lightboxImage || retryImageAtOrigin(event.target)) return;
     event.target.style.visibility = "hidden";
     event.target.closest("button, .app-card, .topic-card-logo")?.classList.add("image-error");
   }
@@ -2465,7 +2569,15 @@ document.addEventListener("error", (event) => {
 
 window.addEventListener("hashchange", () => route());
 window.addEventListener("resize", () => {
-  if (lightbox.open) updateLightbox();
+  if (lightbox.open) {
+    syncLightboxFit();
+    updateLightbox();
+  }
+});
+window.visualViewport?.addEventListener("resize", () => {
+  if (!lightbox.open) return;
+  syncLightboxFit();
+  updateLightbox();
 });
 window.addEventListener("keydown", (event) => {
   if (lightbox.open) {

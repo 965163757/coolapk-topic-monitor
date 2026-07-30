@@ -14,6 +14,7 @@ import { AsyncTtlCache } from "./lib/async-cache.js";
 import { createPayloadVariants, requestEtagMatches, selectPayload } from "./lib/http-delivery.js";
 import { CoalescedJsonWriter } from "./lib/coalesced-json-writer.js";
 import { BoundedTaskQueue } from "./lib/bounded-task-queue.js";
+import { imageBrowserCacheControl, imageCdnRedirectUrl, imageSurrogateCacheControl, normalizeImageCdnBase } from "./lib/image-delivery.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -33,6 +34,7 @@ const IMAGE_FETCH_TIMEOUT_MS = Math.max(3_000, Number(process.env.IMAGE_FETCH_TI
 const IMAGE_MAX_BYTES = Math.max(1024 * 1024, Number(process.env.IMAGE_MAX_BYTES) || 20 * 1024 * 1024);
 const IMAGE_FETCH_MAX_ACTIVE = Math.max(1, Math.min(64, Math.trunc(Number(process.env.IMAGE_FETCH_MAX_ACTIVE) || 12)));
 const IMAGE_FETCH_MAX_QUEUED = Math.max(1, Math.min(512, Math.trunc(Number(process.env.IMAGE_FETCH_MAX_QUEUED) || 64)));
+const IMAGE_CDN_BASE_URL = normalizeImageCdnBase(process.env.IMAGE_CDN_BASE_URL);
 
 const APP_ID = "wx7c6be4984041fa23";
 const APP_SECRET = "a717e41f8e9254c52da78d70003f24a0";
@@ -96,6 +98,7 @@ const imageProxyCache = new ImageProxyCache({
   directory: join(ROOT, "data", "image-cache"),
   maxMemoryBytes: Math.max(8 * 1024 * 1024, Number(process.env.IMAGE_MEMORY_CACHE_BYTES) || 48 * 1024 * 1024),
   maxDiskBytes: Math.max(64 * 1024 * 1024, Number(process.env.IMAGE_DISK_CACHE_BYTES) || 512 * 1024 * 1024),
+  maxDiskEntries: Math.max(200, Math.min(20_000, Math.trunc(Number(process.env.IMAGE_DISK_CACHE_ENTRIES) || 2_000))),
 });
 const imageProxyInflight = new Map();
 const imageFetchQueue = new BoundedTaskQueue({
@@ -2053,7 +2056,9 @@ function sendImage(request, response, entry, cacheStatus, startedAt) {
   const headers = {
     "Content-Type": entry.contentType,
     "Content-Length": String(entry.body.byteLength),
-    "Cache-Control": "public, max-age=604800, stale-while-revalidate=2592000, immutable",
+    "Cache-Control": imageBrowserCacheControl(),
+    "CDN-Cache-Control": imageSurrogateCacheControl(),
+    "Surrogate-Control": imageSurrogateCacheControl(),
     ETag: entry.etag,
     Age: String(age),
     "X-Content-Type-Options": "nosniff",
@@ -2107,6 +2112,16 @@ async function proxyImage(request, response, url) {
 
 async function handleApi(request, response, url) {
   if (["GET", "HEAD"].includes(request.method) && url.pathname === "/api/image") {
+    const cdnUrl = imageCdnRedirectUrl(url, IMAGE_CDN_BASE_URL);
+    if (cdnUrl) {
+      response.writeHead(307, {
+        Location: cdnUrl,
+        "Cache-Control": "public, max-age=86400",
+        "X-Image-Delivery": "CDN",
+        "X-Content-Type-Options": "nosniff",
+      });
+      return response.end();
+    }
     return proxyImage(request, response, url);
   }
   if (request.method === "GET" && url.pathname === "/api/health") {
@@ -2120,6 +2135,10 @@ async function handleApi(request, response, url) {
         ...imageProxyCache.stats(),
         inflight: imageProxyInflight.size,
         fetchQueue: imageFetchQueue.stats(),
+        delivery: {
+          mode: IMAGE_CDN_BASE_URL ? "cdn" : "proxy",
+          cdnHost: IMAGE_CDN_BASE_URL ? new URL(IMAGE_CDN_BASE_URL).host : "",
+        },
       },
       publicDataCache: publicDataCache.stats(),
       staticAssets: { cached: staticAssetCache.size },

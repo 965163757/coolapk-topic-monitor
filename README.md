@@ -4,7 +4,15 @@
 
 服务每 5 分钟按发布时间增量采集监控话题，数据去重后写入长期归档。每个话题都可在关键词判断与 AI 判断中二选一；AI 可结合正文和图片给出 0–100% 的匹配度，达到阈值后进入飞书通知流程。
 
-当前版本：**3.4.0**
+当前版本：**3.4.2**
+
+## 3.4.2 图片体验与 CDN 更新
+
+- 灯箱按真实可视区域计算适屏尺寸，超长竖图不会再被顶栏或底栏遮住；缩放、拖拽边界和横竖屏切换同步修正
+- 灯箱首开按视口请求 960–1920px 的 WebP，只有继续放大时才升级到 1920px 高清版本，降低首次查看耗时与流量
+- 图片响应使用一年不可变浏览器缓存，并同时输出 CDN/代理缓存头；重复浏览优先命中客户端、边缘或本机磁盘缓存
+- 可通过 `IMAGE_CDN_BASE_URL` 接入自有 CDN/Pull Zone；服务端使用防循环的源站标记，CDN 故障时前端自动回退本站图片源站
+- 酷安图片 CDN 会阻止第三方页面直接嵌入，因此默认仍使用受控代理，避免简单直链导致 Tencent EdgeOne 567 和图片空白
 
 ## 3.4.0 性能更新
 
@@ -68,9 +76,11 @@ $env:PORT=4173
 $env:POLL_INTERVAL_MS=300000
 $env:IMAGE_MEMORY_CACHE_BYTES=50331648
 $env:IMAGE_DISK_CACHE_BYTES=536870912
+$env:IMAGE_DISK_CACHE_ENTRIES=2000
 $env:IMAGE_CACHE_FRESH_MS=604800000
 $env:IMAGE_FETCH_MAX_ACTIVE=12
 $env:IMAGE_FETCH_MAX_QUEUED=64
+$env:IMAGE_CDN_BASE_URL="https://cdn.example.com/"
 $env:OPENAI_API_KEY="OPENAI_API_KEY"
 $env:OPENAI_BASE_URL="https://api.openai.com/v1"
 $env:OPENAI_MODEL="gpt-5.6-luna"
@@ -155,7 +165,7 @@ npm start
 - `GET /api/evaluations?page=1&pageSize=50&status=matched|all&topic=话题名`：按话题筛选、去重后的当前判断、分页记录与聚合统计
 - `GET /api/feeds/:id`：动态完整详情及第一页评论
 - `GET /api/feeds/:id/replies?page=2`：分页评论
-- `GET /api/image?url=图片地址&w=720&q=78&format=webp`：带尺寸转换、两级缓存与条件请求的酷安图片代理
+- `GET /api/image?url=图片地址&w=720&q=78&format=webp`：带尺寸转换、两级缓存、长期客户端/CDN 缓存与条件请求的酷安图片代理
 - `GET /api/search/feeds?q=关键词&sort=created_desc`：帖子搜索（远端候选、监控缓存和归档联合检索）
 - `GET /api/discovery/feeds?mode=recent|hot`：全站新鲜或热门动态
 - `GET /api/search/users?q=关键词`：用户搜索
