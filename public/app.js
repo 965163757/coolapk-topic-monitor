@@ -33,6 +33,11 @@ const state = {
   evaluations: [],
   evaluationStats: { total: 0, matched: 0, notified: 0, errors: 0 },
   channelCache: new Map(),
+  pageCache: new Map(),
+  home: { channel: "home", page: 1, feeds: [], supportingData: null, requestId: 0, loading: false },
+  channelPage: { source: "", page: 1, data: null, requestId: 0 },
+  topicDetail: { source: "", sort: "dateline_desc", page: 1, feeds: [], requestId: 0 },
+  detailRequests: { topic: 0 },
   discover: { mode: "recent", page: 1, feeds: [] },
   monitor: {
     topic: "__all__",
@@ -91,6 +96,16 @@ const PAGE_CHANNELS = {
   V8_MARKET_GAME: "games",
   V10_MARKET_RANK: "app_rankings",
 };
+const HOME_CHANNELS = [
+  { key: "home", label: "推荐", icon: "house", description: "酷安编辑精选与社区热门内容" },
+  { key: "news", label: "快讯", icon: "lightning", description: "数码科技行业的即时消息" },
+  { key: "questions", label: "问答", icon: "question", description: "酷友正在讨论的问题与回答" },
+  { key: "pictures", label: "酷图", icon: "image", description: "摄影、桌面与设备美图" },
+  { key: "digital", label: "数码", icon: "device-mobile", description: "手机、电脑与智能设备内容" },
+  { key: "goods", label: "好物", icon: "shopping-bag", description: "酷友分享的实用产品与体验" },
+  { key: "tutorials", label: "教程", icon: "book-open-text", description: "玩机技巧与实用教程" },
+  { key: "chat", label: "闲聊", icon: "chats-circle", description: "轻松日常与社区闲聊" },
+];
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -123,6 +138,21 @@ function safeUrl(value = "") {
 function imageUrl(value = "") {
   const url = safeUrl(value);
   return url ? `/api/image?url=${encodeURIComponent(url)}` : "";
+}
+
+function publicSourceKey(value = "") {
+  const source = String(value || "").trim();
+  if (source.startsWith("topic:") || source.startsWith("product:")) return source;
+  try {
+    const url = new URL(source, location.origin);
+    const topic = url.pathname.match(/^\/t\/(.+)$/);
+    if (topic) return `topic:${decodeURIComponent(topic[1])}`;
+    const product = url.pathname.match(/^\/product\/([^/]+)$/);
+    if (product) return `product:${decodeURIComponent(product[1])}`;
+  } catch {
+    // Legacy plain topic names are handled below.
+  }
+  return source ? `topic:${source}` : "";
 }
 
 function compactNumber(value) {
@@ -246,7 +276,7 @@ function feedCard(feed, options = {}) {
             <button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username || "酷友")}</button>
             <small>${escapeHtml(relativeTime(feed.createdAt))}${feed.device ? ` · ${escapeHtml(feed.device)}` : ""}</small>
           </div>
-          ${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(feed.topic)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}
+          ${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(`topic:${feed.topic}`)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}
         </header>
         <h2 class="feed-title">${escapeHtml(title)}</h2>
         ${message && message !== title ? `<p class="feed-text">${escapeHtml(message)}</p>` : ""}
@@ -283,9 +313,10 @@ function topicCard(topic, { showMonitor = true } = {}) {
   const monitored = state.topics.some((item) => item.sourceKey === topic.sourceKey || item.tag === topic.tag);
   const logo = topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : `<i class="ph ph-hash"></i>`;
   const title = topic.title || topic.tag;
+  const source = topic.sourceKey || (topic.url ? topic.url : `topic:${topic.tag || title}`);
   return `<article class="topic-card">
-    <button class="topic-card-cover" type="button" data-public-topic="${escapeHtml(topic.tag || title)}" aria-label="查看话题：${escapeHtml(title)}">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : ""}</button>
-    <div class="topic-card-body"><span class="topic-card-logo">${logo}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stripHtml(topic.description || topic.intro || "查看话题中的最新公开动态"))}</p>
+    <button class="topic-card-cover" type="button" data-public-topic="${escapeHtml(source)}" aria-label="查看话题：${escapeHtml(title)}">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : ""}</button>
+    <div class="topic-card-body"><span class="topic-card-logo">${logo}</span><button class="topic-card-open" type="button" data-public-topic="${escapeHtml(source)}"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stripHtml(topic.description || topic.intro || "查看话题中的最新公开动态"))}</p></button>
       <footer><span>${compactNumber(topic.followers)} 关注</span><span>${compactNumber(topic.posts)} 动态</span>${showMonitor ? `<button type="button" data-monitor-add="${escapeHtml(topic.sourceKey || topic.tag)}" aria-label="${monitored ? "已监控" : "加入监控"}：${escapeHtml(title)}" ${monitored ? "disabled" : ""}>${monitored ? "已监控" : "加入监控"}</button>` : ""}</footer>
     </div>
   </article>`;
@@ -304,7 +335,7 @@ function renderHero(banners = []) {
   if (!banners.length) {
     return `<section class="hero-carousel"><div class="hero-fallback"><span>COOLAPK WEB</span><h2>在浏览器里，打开完整的酷安内容工作台</h2><p>首页、动态、应用、话题、详情评论与 AI 监控，现在统一在一个响应式界面中。</p></div></section>`;
   }
-  return `<section class="hero-carousel" id="heroCarousel">${banners.map((banner, index) => `<button class="hero-slide ${index === 0 ? "active" : ""}" type="button" data-smart-link="${escapeHtml(banner.url)}" aria-label="打开精选内容：${escapeHtml(banner.title)}"><img src="${escapeHtml(imageUrl(banner.picture))}" alt="" /><span class="hero-caption"><small>今日精选</small><h2>${escapeHtml(banner.title)}</h2><p>${escapeHtml(banner.subtitle || "来自酷安社区的热门内容")}</p></span></button>`).join("")}<div class="hero-dots">${banners.map((_, index) => `<button class="${index === 0 ? "active" : ""}" type="button" data-hero-index="${index}" aria-label="切换到第 ${index + 1} 张精选内容"></button>`).join("")}</div></section>`;
+  return `<section class="hero-carousel" id="heroCarousel" aria-label="今日精选">${banners.map((banner, index) => `<button class="hero-slide ${index === 0 ? "active" : ""}" type="button" data-smart-link="${escapeHtml(banner.url)}" data-link-title="${escapeHtml(banner.title)}" aria-label="打开精选内容：${escapeHtml(banner.title)}" aria-hidden="${index === 0 ? "false" : "true"}" tabindex="${index === 0 ? "0" : "-1"}"><img src="${escapeHtml(imageUrl(banner.picture))}" alt="" /><span class="hero-caption"><small>今日精选</small><h2>${escapeHtml(banner.title)}</h2><p>${escapeHtml(banner.subtitle || "来自酷安社区的热门内容")}</p><b>站内查看<i class="ph ph-arrow-right"></i></b></span></button>`).join("")}<div class="hero-dots">${banners.map((_, index) => `<button class="${index === 0 ? "active" : ""}" type="button" data-hero-index="${index}" aria-label="切换到第 ${index + 1} 张精选内容"></button>`).join("")}</div></section>`;
 }
 
 function renderShortcuts(shortcuts = []) {
@@ -316,7 +347,19 @@ function renderShortcuts(shortcuts = []) {
     { title: "话题", url: "#/topics", icon: "hash" },
   ];
   const items = shortcuts.length ? shortcuts.slice(0, 10) : fallback;
-  return `<div class="shortcut-strip">${items.map((item) => `<button class="shortcut" type="button" data-smart-link="${escapeHtml(item.url)}">${item.picture ? `<img src="${escapeHtml(imageUrl(item.picture))}" alt="" loading="lazy" />` : `<span class="shortcut-icon"><i class="ph ph-${escapeHtml(item.icon || "sparkle")}"></i></span>`}<span>${escapeHtml(item.title)}</span></button>`).join("")}</div>`;
+  return `<div class="shortcut-strip">${items.map((item) => `<button class="shortcut" type="button" data-smart-link="${escapeHtml(item.url)}" data-link-title="${escapeHtml(item.title)}" aria-label="打开${escapeHtml(item.title)}">${item.picture ? `<img src="${escapeHtml(imageUrl(item.picture))}" alt="" loading="lazy" />` : `<span class="shortcut-icon"><i class="ph ph-${escapeHtml(item.icon || "sparkle")}"></i></span>`}<span>${escapeHtml(item.title)}</span><i class="ph ph-arrow-up-right"></i></button>`).join("")}</div>`;
+}
+
+function renderEditorialSections(sections = []) {
+  return sections.filter((section) => section?.items?.length).slice(0, 3).map((section) => `
+    <section class="surface editorial-section">
+      <header class="surface-head"><div><h2>${escapeHtml(/^(?:#?\/|[A-Za-z]+:\/\/)/.test(String(section.title || "")) ? "参与社区讨论" : section.title || "精选内容")}</h2><p>来自酷安编辑推荐，点击后在站内继续浏览</p></div><span>${section.items.length} 条</span></header>
+      <div class="editorial-grid">${section.items.slice(0, 12).map((item, index) => `<button type="button" data-smart-link="${escapeHtml(item.url)}" data-link-title="${escapeHtml(item.title)}" aria-label="打开：${escapeHtml(item.title)}">${item.picture ? `<img src="${escapeHtml(imageUrl(item.picture))}" alt="" loading="lazy" />` : `<span>${String(index + 1).padStart(2, "0")}</span>`}<div><small>${escapeHtml(item.entityType === "feed" ? "精选动态" : "社区内容")}</small><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.subtitle || "查看完整内容")}</p></div><i class="ph ph-caret-right"></i></button>`).join("")}</div>
+    </section>`).join("");
+}
+
+function homeChannelMeta(channel) {
+  return HOME_CHANNELS.find((item) => item.key === channel) || HOME_CHANNELS[0];
 }
 
 async function loadBaseState() {
@@ -355,14 +398,14 @@ function updateChrome(error = false) {
 }
 
 function setActiveNavigation(route) {
-  const navRoute = route === "search" ? "" : route;
+  const navRoute = route === "channel" ? "home" : route === "search" ? "" : route;
   $$("[data-nav]").forEach((item) => item.classList.toggle("active", item.dataset.nav === navRoute));
 }
 
 function parseRoute() {
   const value = location.hash.replace(/^#\/?/, "");
   const [path = "home", query = ""] = value.split("?");
-  const route = ["home", "discover", "apps", "topics", "notifications", "account", "monitor", "ai", "settings", "search"].includes(path) ? path : "home";
+  const route = ["home", "channel", "discover", "apps", "topics", "notifications", "account", "monitor", "ai", "settings", "search"].includes(path) ? path : "home";
   return { route, params: new URLSearchParams(query) };
 }
 
@@ -378,6 +421,7 @@ async function route({ force = false } = {}) {
   const sequence = ++state.requestSequence;
   viewHost.innerHTML = pageLoading({
     home: "正在加载首页",
+    channel: "正在加载内容频道",
     discover: "正在加载动态广场",
     apps: "正在加载应用与游戏",
     topics: "正在加载话题",
@@ -389,7 +433,7 @@ async function route({ force = false } = {}) {
     search: "正在搜索",
   }[parsed.route]);
   try {
-    const renderers = { home: renderHome, discover: renderDiscover, apps: renderApps, topics: renderTopics, notifications: renderNotifications, account: renderAccount, monitor: renderMonitor, ai: renderAi, settings: renderSettings, search: renderSearch };
+    const renderers = { home: renderHome, channel: renderChannel, discover: renderDiscover, apps: renderApps, topics: renderTopics, notifications: renderNotifications, account: renderAccount, monitor: renderMonitor, ai: renderAi, settings: renderSettings, search: renderSearch };
     await renderers[parsed.route]({ force, sequence });
     if (sequence === state.requestSequence) {
       viewHost.focus({ preventScroll: true });
@@ -404,50 +448,147 @@ async function route({ force = false } = {}) {
 
 async function channelData(channel, { force = false, page = 1 } = {}) {
   const key = `${channel}:${page}`;
+  if (force) {
+    [...state.channelCache.keys()].filter((item) => item.startsWith(`${channel}:`)).forEach((item) => state.channelCache.delete(item));
+  }
   if (!force && state.channelCache.has(key)) return state.channelCache.get(key);
   const data = await api(`/api/web/channel?channel=${encodeURIComponent(channel)}&page=${page}`);
   state.channelCache.set(key, data);
   return data;
 }
 
+async function pageData(source, { force = false, page = 1 } = {}) {
+  const key = `${source}:${page}`;
+  if (force) {
+    [...state.pageCache.keys()].filter((item) => item.startsWith(`${source}:`)).forEach((item) => state.pageCache.delete(item));
+  }
+  if (!force && state.pageCache.has(key)) return state.pageCache.get(key);
+  const data = await api(`/api/web/page?source=${encodeURIComponent(source)}&page=${page}`);
+  state.pageCache.set(key, data);
+  return data;
+}
+
 async function renderHome({ force, sequence }) {
-  const data = await channelData("home", { force });
+  const [data, trending] = await Promise.all([
+    channelData("home", { force }),
+    channelData("topics", { force }).catch(() => ({ topics: [] })),
+  ]);
   if (sequence !== state.requestSequence) return;
-  const topics = data.topics.length ? data.topics : state.topics.map((item) => item.detail || item).filter(Boolean);
+  const topics = trending.topics?.length ? trending.topics : data.topics || [];
+  const requested = state.routeParams.get("channel") || "home";
+  const initialChannel = HOME_CHANNELS.some((item) => item.key === requested) ? requested : "home";
+  const initialMeta = homeChannelMeta(initialChannel);
+  state.home = {
+    channel: initialChannel,
+    page: 1,
+    feeds: initialChannel === "home" ? data.feeds || [] : [],
+    supportingData: initialChannel === "home" ? {} : null,
+    requestId: state.home.requestId,
+    loading: initialChannel !== "home",
+  };
   viewHost.innerHTML = `<section class="page home-page">
-    ${pageHead("COMMUNITY DESK", "今天，酷安有什么新鲜事", "将 Coolapk-UWP 的公开浏览体验重构为 Web，同时把 AI 监控作为独立工作台保留下来。", `<a class="btn secondary" href="#/monitor"><i class="ph ph-radar"></i>进入监控</a><button class="btn primary" type="button" data-route-refresh><i class="ph ph-arrows-clockwise"></i>刷新首页</button>`)}
+    ${pageHead("COOLAPK HOME", "酷安首页", "编辑精选、社区频道、热门话题与实时动态都在站内连续浏览。", `<a class="btn secondary" href="#/monitor"><i class="ph ph-radar"></i>智能监控</a><button class="btn primary" type="button" data-route-refresh><i class="ph ph-arrows-clockwise"></i>刷新内容</button>`)}
     <div class="content-layout">
       <div class="content-column">
         ${renderHero(data.banners)}
-        <section class="surface">${renderShortcuts(data.shortcuts)}</section>
-        <div class="channel-tabs" id="homeChannelTabs">
-          ${[["home", "头条"], ["news", "快讯"], ["questions", "问答"], ["pictures", "酷图"], ["digital", "数码"]].map(([key, label]) => `<button class="${key === "home" ? "active" : ""}" type="button" data-home-channel="${key}">${label}</button>`).join("")}
-        </div>
-        <div id="homeFeedRegion">${feedStream(data.feeds)}</div>
+        <section class="surface home-shortcuts"><header class="surface-head"><div><h2>快捷入口</h2><p>专题、热闻与官方内容均在站内打开</p></div><a href="#/discover">动态广场<i class="ph ph-caret-right"></i></a></header>${renderShortcuts(data.shortcuts)}</section>
+        ${renderEditorialSections(data.sections)}
+        <section class="home-feed-panel" id="homeFeedPanel">
+          <header class="home-channel-head"><div><small>COMMUNITY CHANNEL</small><h2 id="homeChannelTitle">${escapeHtml(initialMeta.label)}</h2><p id="homeChannelDescription">${escapeHtml(initialMeta.description)}</p></div><span id="homeChannelStatus">${initialChannel === "home" ? `${data.feeds.length} 条内容` : "正在加载"}</span></header>
+          <nav class="channel-tabs" id="homeChannelTabs" aria-label="首页内容频道">
+            ${HOME_CHANNELS.map((item) => `<button class="${item.key === initialChannel ? "active" : ""}" type="button" data-home-channel="${item.key}" aria-selected="${item.key === initialChannel ? "true" : "false"}"><i class="ph ph-${item.icon}"></i>${item.label}</button>`).join("")}
+          </nav>
+          <div id="homeFeedRegion" aria-live="polite" aria-busy="${initialChannel === "home" ? "false" : "true"}">${initialChannel === "home" ? feedStream(data.feeds) : skeletonFeeds(2)}</div>
+          <div class="load-more home-load-more"><button class="btn secondary" type="button" data-home-load-more ${initialChannel === "home" && data.feeds.length ? "" : "disabled"}><i class="ph ph-plus-circle"></i>加载更多${escapeHtml(initialMeta.label)}</button></div>
+        </section>
       </div>
       <aside class="side-column">
-        <section class="surface"><header class="surface-head"><div><h3>智能监控概览</h3><p>每 5 分钟自动抓取与判断</p></div><a href="#/monitor">管理<i class="ph ph-caret-right"></i></a></header>
+        <section class="surface home-monitor-card"><header class="surface-head"><div><h3>智能监控</h3><p>每 5 分钟自动抓取与判断</p></div><a href="#/monitor">管理<i class="ph ph-caret-right"></i></a></header>
           <div class="stat-list"><article><small>监控话题</small><strong>${state.topics.length}</strong></article><article><small>AI 命中</small><strong>${compactNumber(state.evaluationStats.matched)}</strong></article><article><small>已通知</small><strong>${compactNumber(state.evaluationStats.notified)}</strong></article><article><small>归档动态</small><strong>${compactNumber(state.status?.archive?.feeds)}</strong></article></div>
         </section>
-        <section class="surface"><header class="surface-head"><div><h3>热门话题</h3><p>社区正在讨论</p></div><a href="#/topics">全部</a></header><div class="topic-mini-list">${topics.slice(0, 6).map((topic) => `<button class="topic-mini" type="button" data-public-topic="${escapeHtml(topic.tag || topic.title)}">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : `<span><i class="ph ph-hash"></i></span>`}<div><strong>${escapeHtml(topic.title || topic.tag)}</strong><small>${compactNumber(topic.followers || 0)} 人关注</small></div><i class="ph ph-caret-right"></i></button>`).join("") || emptyState("hash", "等待话题数据", "切换到话题页进行搜索。")}</div></section>
+        <section class="surface trending-topics"><header class="surface-head"><div><h3>热门话题</h3><p>来自真实话题榜单</p></div><a href="#/topics">查看全部</a></header><div class="topic-mini-list">${topics.slice(0, 8).map((topic, index) => `<button class="topic-mini" type="button" data-public-topic="${escapeHtml(topic.sourceKey || topic.url || `topic:${topic.tag || topic.title}`)}"><b>${index + 1}</b>${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : `<span><i class="ph ph-hash"></i></span>`}<div><strong>${escapeHtml(topic.title || topic.tag)}</strong><small>${compactNumber(topic.followers || 0)} 关注 · ${compactNumber(topic.posts || 0)} 动态</small></div><i class="ph ph-caret-right"></i></button>`).join("") || emptyState("hash", "等待话题数据", "切换到话题页进行搜索。")}</div></section>
       </aside>
     </div>
   </section>`;
   startCarousel();
-  const requestedChannel = state.routeParams.get("channel");
-  if (requestedChannel && requestedChannel !== "home") loadHomeChannel(requestedChannel);
+  if (initialChannel !== "home") loadHomeChannel(initialChannel, { updateUrl: false, force });
 }
 
-async function loadHomeChannel(channel) {
+async function loadHomeChannel(channel, { append = false, force = false, updateUrl = true } = {}) {
   const region = $("#homeFeedRegion");
-  if (!region) return;
-  $$("[data-home-channel]").forEach((button) => button.classList.toggle("active", button.dataset.homeChannel === channel));
-  region.innerHTML = skeletonFeeds(2);
+  const panel = $("#homeFeedPanel");
+  const loadMore = $("[data-home-load-more]");
+  if (!region || !panel || !HOME_CHANNELS.some((item) => item.key === channel)) return;
+  const meta = homeChannelMeta(channel);
+  const requestId = ++state.home.requestId;
+  const nextPage = append && state.home.channel === channel ? state.home.page + 1 : 1;
+  state.home.channel = channel;
+  state.home.loading = true;
+  $$("[data-home-channel]").forEach((button) => {
+    const active = button.dataset.homeChannel === channel;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  $("#homeChannelTitle").textContent = meta.label;
+  $("#homeChannelDescription").textContent = meta.description;
+  $("#homeChannelStatus").textContent = append ? `正在加载第 ${nextPage} 页` : "正在加载";
+  region.setAttribute("aria-busy", "true");
+  panel.classList.add("loading");
+  if (!append) region.innerHTML = skeletonFeeds(2);
+  if (loadMore) {
+    loadMore.disabled = true;
+    loadMore.innerHTML = `<i class="ph ph-circle-notch"></i>正在加载`;
+  }
+  if (updateUrl) {
+    const query = channel === "home" ? "" : `?channel=${encodeURIComponent(channel)}`;
+    history.replaceState(null, "", `#/home${query}`);
+  }
   try {
-    const data = await channelData(channel);
-    region.innerHTML = feedStream(data.feeds);
+    const data = await channelData(channel, { page: nextPage, force });
+    if (requestId !== state.home.requestId || state.route !== "home") return;
+    const previousFeedCount = state.home.feeds.length;
+    const feeds = append
+      ? [...new Map([...state.home.feeds, ...(data.feeds || [])].map((feed) => [String(feed.id), feed])).values()]
+      : data.feeds || [];
+    const addedFeedCount = append ? feeds.length - previousFeedCount : feeds.length;
+    const supportingData = channel === "home" ? {} : append ? state.home.supportingData || {} : data;
+    state.home = { ...state.home, channel, page: nextPage, feeds, supportingData, loading: false, requestId };
+    const supportingCount = (supportingData.apps?.length || 0) + (supportingData.topics?.length || 0) + (supportingData.users?.length || 0) + (supportingData.shortcuts?.length || 0);
+    const supportingContent = [
+      supportingData.shortcuts?.length ? `<section class="surface channel-inline-section"><header class="surface-head"><div><h3>频道入口</h3><p>继续在站内浏览细分内容</p></div></header>${renderShortcuts(supportingData.shortcuts)}</section>` : "",
+      renderEditorialSections(supportingData.sections),
+      supportingData.apps?.length ? `<section class="surface channel-inline-section"><header class="surface-head"><div><h3>应用与游戏</h3><p>${supportingData.apps.length} 个结果</p></div></header><div class="entity-section-body">${appGrid(supportingData.apps)}</div></section>` : "",
+      supportingData.topics?.length ? `<section class="surface channel-inline-section"><header class="surface-head"><div><h3>话题与产品</h3><p>${supportingData.topics.length} 个结果</p></div></header><div class="entity-section-body">${topicGrid(supportingData.topics)}</div></section>` : "",
+      supportingData.users?.length ? `<section class="surface channel-inline-section"><header class="surface-head"><div><h3>推荐酷友</h3><p>${supportingData.users.length} 位用户</p></div></header><div class="entity-section-body">${userCards(supportingData.users)}</div></section>` : "",
+    ].filter(Boolean).join("");
+    region.innerHTML = `${supportingContent}${feeds.length || !supportingContent ? feedStream(feeds) : ""}`;
+    $("#homeChannelStatus").textContent = `${feeds.length + supportingCount} 条内容 · 第 ${nextPage} 页`;
+    if (loadMore) {
+      loadMore.disabled = addedFeedCount <= 0;
+      loadMore.innerHTML = loadMore.disabled
+        ? `<i class="ph ph-check"></i>没有更多内容`
+        : `<i class="ph ph-plus-circle"></i>加载更多${escapeHtml(meta.label)}`;
+    }
   } catch (error) {
-    region.innerHTML = `<div class="inline-error">${escapeHtml(error.message)}</div>`;
+    if (requestId !== state.home.requestId) return;
+    state.home.loading = false;
+    if (!append) {
+      region.innerHTML = `<div class="inline-error"><i class="ph ph-warning-circle"></i><span>${escapeHtml(error.message)}</span><button type="button" data-home-retry>重新加载</button></div>`;
+    } else {
+      toast(`第 ${nextPage} 页加载失败：${error.message}`, "error");
+    }
+    $("#homeChannelStatus").textContent = append ? `第 ${nextPage} 页加载失败，已保留现有内容` : "加载失败";
+    if (loadMore) {
+      loadMore.disabled = !append;
+      loadMore.innerHTML = append
+        ? `<i class="ph ph-arrow-clockwise"></i>重试加载第 ${nextPage} 页`
+        : `<i class="ph ph-warning"></i>等待重试`;
+    }
+  } finally {
+    if (requestId === state.home.requestId) {
+      region.setAttribute("aria-busy", "false");
+      panel.classList.remove("loading");
+    }
   }
 }
 
@@ -459,11 +600,105 @@ function startCarousel() {
   const dots = $$("[data-hero-index]", carousel);
   const show = (next) => {
     index = (next + slides.length) % slides.length;
-    slides.forEach((slide, itemIndex) => slide.classList.toggle("active", itemIndex === index));
+    slides.forEach((slide, itemIndex) => {
+      const active = itemIndex === index;
+      slide.classList.toggle("active", active);
+      slide.setAttribute("aria-hidden", String(!active));
+      slide.tabIndex = active ? 0 : -1;
+    });
     dots.forEach((dot, itemIndex) => dot.classList.toggle("active", itemIndex === index));
   };
   carousel._showSlide = show;
-  state.carouselTimer = setInterval(() => show(index + 1), 6000);
+  const play = () => {
+    clearInterval(state.carouselTimer);
+    state.carouselTimer = setInterval(() => show(index + 1), 6000);
+  };
+  const pause = () => clearInterval(state.carouselTimer);
+  carousel.addEventListener("mouseenter", pause);
+  carousel.addEventListener("mouseleave", play);
+  carousel.addEventListener("focusin", pause);
+  carousel.addEventListener("focusout", (event) => {
+    if (!carousel.contains(event.relatedTarget)) play();
+  });
+  play();
+}
+
+function channelPageContent(data) {
+  const sections = [
+    data.banners?.length ? renderHero(data.banners) : "",
+    data.shortcuts?.length ? `<section class="surface home-shortcuts"><header class="surface-head"><div><h2>频道入口</h2><p>继续在站内打开分类与专题</p></div></header>${renderShortcuts(data.shortcuts)}</section>` : "",
+    renderEditorialSections(data.sections),
+    data.feeds?.length ? `<section class="channel-result-section"><header class="surface-head"><div><h2>动态内容</h2><p>${data.feeds.length} 条公开内容</p></div></header><div id="channelPageFeeds">${feedStream(data.feeds)}</div></section>` : "",
+    data.apps?.length ? `<section class="surface channel-entity-section"><header class="surface-head"><div><h2>应用与游戏</h2><p>${data.apps.length} 个结果</p></div></header><div class="entity-section-body">${appGrid(data.apps)}</div></section>` : "",
+    data.topics?.length ? `<section class="surface channel-entity-section"><header class="surface-head"><div><h2>话题与产品</h2><p>${data.topics.length} 个结果</p></div></header><div class="entity-section-body">${topicGrid(data.topics)}</div></section>` : "",
+    data.users?.length ? `<section class="surface channel-entity-section"><header class="surface-head"><div><h2>推荐酷友</h2><p>${data.users.length} 位用户</p></div></header><div class="entity-section-body">${userCards(data.users)}</div></section>` : "",
+  ].filter(Boolean);
+  return sections.length ? sections.join("") : emptyState("files", "该频道暂时没有内容", "上游页面没有返回可展示的公开数据，请稍后刷新。");
+}
+
+function channelResultCount(data = {}) {
+  return ["feeds", "apps", "topics", "users", "shortcuts", "sections", "banners"]
+    .reduce((total, key) => total + (Array.isArray(data[key]) ? data[key].length : 0), 0);
+}
+
+function mergeChannelPageData(current = {}, next = {}) {
+  const uniqueBy = (items, key) => [...new Map(items.filter(Boolean).map((item, index) => [String(item?.[key] || `${item?.title || ""}:${item?.url || ""}:${index}`), item])).values()];
+  return {
+    ...current,
+    ...next,
+    banners: uniqueBy([...(current.banners || []), ...(next.banners || [])], "url"),
+    shortcuts: uniqueBy([...(current.shortcuts || []), ...(next.shortcuts || [])], "url"),
+    feeds: uniqueBy([...(current.feeds || []), ...(next.feeds || [])], "id"),
+    apps: uniqueBy([...(current.apps || []), ...(next.apps || [])], "id"),
+    topics: uniqueBy([...(current.topics || []), ...(next.topics || [])], "sourceKey"),
+    users: uniqueBy([...(current.users || []), ...(next.users || [])], "uid"),
+    sections: uniqueBy([...(current.sections || []), ...(next.sections || [])], "title"),
+  };
+}
+
+async function renderChannel({ force, sequence }) {
+  const source = String(state.routeParams.get("source") || "").trim();
+  const title = String(state.routeParams.get("title") || "酷安专题").trim().slice(0, 80);
+  if (!source) throw new Error("缺少频道页面标识");
+  const data = await pageData(source, { force, page: 1 });
+  if (sequence !== state.requestSequence) return;
+  state.channelPage = { source, page: 1, data, requestId: state.channelPage.requestId + 1 };
+  viewHost.innerHTML = `<section class="page channel-page">
+    ${pageHead("COOLAPK CHANNEL", title, data.channel?.description || "酷安专题与编辑精选内容", `<a class="btn secondary" href="#/home"><i class="ph ph-arrow-left"></i>返回首页</a><button class="btn primary" type="button" data-route-refresh><i class="ph ph-arrows-clockwise"></i>刷新频道</button>`)}
+    <div id="channelPageContent">${channelPageContent(data)}</div>
+    ${channelResultCount(data) ? `<div class="load-more channel-page-more"><button class="btn secondary" type="button" data-channel-load-more><i class="ph ph-plus-circle"></i>加载更多内容</button></div>` : ""}
+  </section>`;
+  startCarousel();
+}
+
+async function loadMoreChannelPage() {
+  const button = $("[data-channel-load-more]");
+  if (!button || !state.channelPage.source) return;
+  const requestId = ++state.channelPage.requestId;
+  const nextPage = state.channelPage.page + 1;
+  button.disabled = true;
+  button.innerHTML = `<i class="ph ph-circle-notch"></i>正在加载第 ${nextPage} 页`;
+  try {
+    const data = await pageData(state.channelPage.source, { page: nextPage });
+    if (requestId !== state.channelPage.requestId || state.route !== "channel") return;
+    const previousData = state.channelPage.data || {};
+    const previousCount = channelResultCount(previousData);
+    const mergedData = mergeChannelPageData(previousData, data);
+    const addedCount = channelResultCount(mergedData) - previousCount;
+    state.channelPage.data = mergedData;
+    state.channelPage.page = nextPage;
+    const region = $("#channelPageContent");
+    if (region) region.innerHTML = channelPageContent(mergedData);
+    startCarousel();
+    button.disabled = addedCount <= 0;
+    button.innerHTML = addedCount > 0
+      ? `<i class="ph ph-plus-circle"></i>加载更多内容`
+      : `<i class="ph ph-check"></i>没有更多内容`;
+  } catch (error) {
+    toast(error.message, "error");
+    button.disabled = false;
+    button.innerHTML = `<i class="ph ph-arrow-clockwise"></i>重新加载`;
+  }
 }
 
 async function renderDiscover({ sequence }) {
@@ -914,7 +1149,7 @@ function renderFeedDetail(payload) {
   const title = displayFeedTitle(feed);
   const webUrl = feed.url || `https://www.coolapk.com/feed/${feed.id}`;
   $("#feedDialogSubtitle").textContent = feed.topic || `${feed.comments || payload.replies?.length || 0} 条评论`;
-  feedDialogBody.innerHTML = `<article class="detail-feed"><header class="feed-author">${avatarMarkup(feed.avatar, feed.username)}<div class="feed-author-info"><button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username)}</button><small>${formatDate(feed.createdAt)}${feed.device ? ` · ${escapeHtml(feed.device)}` : ""}</small></div>${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(feed.topic)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}</header><h2 class="feed-title">${escapeHtml(title)}</h2><p class="feed-text">${escapeHtml(stripHtml(feed.message || ""))}</p>${feedImageMarkup(feed)}<footer class="feed-meta detail-feed-actions" style="margin:18px -13px -24px"><button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}" aria-label="${feed.liked ? "取消点赞" : "点赞"}，当前 ${compactNumber(feed.likes)} 个赞"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i><span data-interaction-count data-count="${Number(feed.likes || 0)}">${compactNumber(feed.likes)}</span></button><button type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态" aria-label="回复动态，当前 ${compactNumber(feed.replyCount || feed.comments)} 条评论"><i class="ph ph-chat-circle"></i>${compactNumber(feed.replyCount || feed.comments)}</button><button type="button" data-share-feed="${escapeHtml(feed.id)}" data-share-url="${escapeHtml(webUrl)}" data-share-title="${escapeHtml(title)}"><i class="ph ph-share-network"></i>分享</button><a href="coolmarket://feed/${escapeHtml(feed.id)}" class="open-feed" aria-label="在酷安 App 打开"><i class="ph ph-device-mobile"></i>App</a></footer></article><nav class="detail-subnav" aria-label="动态相关信息"><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="likes"><i class="ph ph-users"></i>点赞用户</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="forwards"><i class="ph ph-share-fat"></i>转发记录</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="history"><i class="ph ph-clock-counter-clockwise"></i>编辑历史</button><a href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></nav><section class="comments-section"><header class="comments-head"><h3>全部评论</h3><span>第 <b id="replyPageNumber">1</b> 页</span></header>${state.account?.configured ? `<button class="quick-reply" type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态"><i class="ph ph-pencil-simple-line"></i>写下你的回复</button>` : ""}<div class="comment-list" id="commentList">${payload.replies?.length ? payload.replies.map(commentMarkup).join("") : emptyState("chat-circle", "还没有评论", "该动态暂时没有返回公开评论。")}</div><div class="load-more"><button class="btn secondary" id="loadMoreReplies" type="button" data-load-replies ${payload.replies?.length ? "" : "disabled"}><i class="ph ph-chat-circle-dots"></i>加载更多评论</button></div></section>`;
+  feedDialogBody.innerHTML = `<article class="detail-feed"><header class="feed-author">${avatarMarkup(feed.avatar, feed.username)}<div class="feed-author-info"><button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username)}</button><small>${formatDate(feed.createdAt)}${feed.device ? ` · ${escapeHtml(feed.device)}` : ""}</small></div>${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(`topic:${feed.topic}`)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}</header><h2 class="feed-title">${escapeHtml(title)}</h2><p class="feed-text">${escapeHtml(stripHtml(feed.message || ""))}</p>${feedImageMarkup(feed)}<footer class="feed-meta detail-feed-actions" style="margin:18px -13px -24px"><button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}" aria-label="${feed.liked ? "取消点赞" : "点赞"}，当前 ${compactNumber(feed.likes)} 个赞"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i><span data-interaction-count data-count="${Number(feed.likes || 0)}">${compactNumber(feed.likes)}</span></button><button type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态" aria-label="回复动态，当前 ${compactNumber(feed.replyCount || feed.comments)} 条评论"><i class="ph ph-chat-circle"></i>${compactNumber(feed.replyCount || feed.comments)}</button><button type="button" data-share-feed="${escapeHtml(feed.id)}" data-share-url="${escapeHtml(webUrl)}" data-share-title="${escapeHtml(title)}"><i class="ph ph-share-network"></i>分享</button><a href="coolmarket://feed/${escapeHtml(feed.id)}" class="open-feed" aria-label="在酷安 App 打开"><i class="ph ph-device-mobile"></i>App</a></footer></article><nav class="detail-subnav" aria-label="动态相关信息"><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="likes"><i class="ph ph-users"></i>点赞用户</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="forwards"><i class="ph ph-share-fat"></i>转发记录</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="history"><i class="ph ph-clock-counter-clockwise"></i>编辑历史</button><a href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></nav><section class="comments-section"><header class="comments-head"><h3>全部评论</h3><span>第 <b id="replyPageNumber">1</b> 页</span></header>${state.account?.configured ? `<button class="quick-reply" type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态"><i class="ph ph-pencil-simple-line"></i>写下你的回复</button>` : ""}<div class="comment-list" id="commentList">${payload.replies?.length ? payload.replies.map(commentMarkup).join("") : emptyState("chat-circle", "还没有评论", "该动态暂时没有返回公开评论。")}</div><div class="load-more"><button class="btn secondary" id="loadMoreReplies" type="button" data-load-replies ${payload.replies?.length ? "" : "disabled"}><i class="ph ph-chat-circle-dots"></i>加载更多评论</button></div></section>`;
 }
 
 async function loadMoreReplies() {
@@ -954,23 +1189,85 @@ async function openApp(id) {
     state.imageGroups.set(screenshotGroup, app.screenshots || []);
     const webUrl = `https://www.coolapk.com/apk/${encodeURIComponent(app.packageName || app.id)}`;
     const appUrl = `coolmarket://apk/${encodeURIComponent(app.packageName || app.id)}`;
-    appDialogBody.innerHTML = `<section class="app-detail-hero">${app.logo ? `<img src="${escapeHtml(imageUrl(app.logo))}" alt="${escapeHtml(app.title)}" />` : `<span class="app-logo-placeholder"><i class="ph ph-app-window"></i></span>`}<div><h2>${escapeHtml(app.title)}</h2><p>${escapeHtml(app.subtitle || app.packageName)}</p><div class="app-detail-stats"><span><strong>${Number(app.score || 0).toFixed(1)}</strong><small>酷友评分</small></span><span><strong>${escapeHtml(app.version || "—")}</strong><small>最新版本</small></span><span><strong>${escapeHtml(app.size || "—")}</strong><small>安装包</small></span><span><strong>${compactNumber(app.downloads)}</strong><small>下载</small></span></div><div class="detail-actions"><a class="btn primary" href="${escapeHtml(appUrl)}"><i class="ph ph-device-mobile"></i>酷安 App 打开</a><a class="btn secondary" href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></div></div></section>${app.packageName ? `<section class="detail-facts"><span><b>包名</b>${escapeHtml(app.packageName)}</span><span><b>开发者</b>${escapeHtml(app.developer || "—")}</span><span><b>分类</b>${escapeHtml(app.category || "—")}</span><span><b>更新时间</b>${escapeHtml(app.updatedAt ? formatDate(app.updatedAt) : "—")}</span></section>` : ""}${app.description ? `<section class="detail-section"><h3>应用介绍</h3><p>${escapeHtml(stripHtml(app.description))}</p></section>` : ""}${app.changelog ? `<section class="detail-section"><h3>更新说明</h3><p>${escapeHtml(stripHtml(app.changelog))}</p></section>` : ""}${app.screenshots?.length ? `<section class="detail-section"><h3>应用截图</h3><div class="screenshots">${app.screenshots.map((picture, index) => `<button type="button" data-image="${escapeHtml(picture)}" data-image-group="${escapeHtml(screenshotGroup)}" data-image-index="${index}" data-caption="${escapeHtml(app.title)}" aria-label="放大应用截图 ${index + 1}"><img src="${escapeHtml(imageUrl(picture))}" alt="应用截图 ${index + 1}" loading="lazy" /></button>`).join("")}</div></section>` : ""}<section class="detail-section"><h3>相关动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
+    appDialogBody.innerHTML = `<section class="app-detail-hero">${app.logo ? `<img src="${escapeHtml(imageUrl(app.logo))}" alt="${escapeHtml(app.title)}" />` : `<span class="app-logo-placeholder"><i class="ph ph-app-window"></i></span>`}<div><h2>${escapeHtml(app.title)}</h2><p>${escapeHtml(app.subtitle || app.packageName)}</p><div class="app-detail-stats"><span><strong>${Number(app.score || 0).toFixed(1)}</strong><small>酷友评分</small></span><span><strong>${escapeHtml(app.version || "—")}</strong><small>最新版本</small></span><span><strong>${escapeHtml(app.size || "—")}</strong><small>安装包</small></span><span><strong>${compactNumber(app.downloads)}</strong><small>下载</small></span></div><div class="detail-actions"><a class="btn primary" href="${escapeHtml(appUrl)}"><i class="ph ph-device-mobile"></i>酷安 App 打开</a><a class="btn secondary" href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></div></div></section>${app.packageName ? `<section class="detail-facts"><span><b>包名</b>${escapeHtml(app.packageName)}</span><span><b>开发者</b>${escapeHtml(app.developer || "—")}</span><span><b>分类</b>${escapeHtml(app.category || "—")}</span><span><b>更新时间</b>${escapeHtml(app.updatedAt ? formatDate(app.updatedAt) : "—")}</span></section>` : ""}${app.description ? `<section class="detail-section"><h3>应用介绍</h3><p>${escapeHtml(stripHtml(app.description))}</p></section>` : ""}${app.changelog ? `<section class="detail-section"><h3>更新说明</h3><p>${escapeHtml(stripHtml(app.changelog))}</p></section>` : ""}${app.permissions?.length ? `<section class="detail-section"><h3>应用权限</h3><div class="permission-list">${app.permissions.map((permission) => `<span><i class="ph ph-shield-check"></i>${escapeHtml(permission)}</span>`).join("")}</div></section>` : ""}${app.screenshots?.length ? `<section class="detail-section"><h3>应用截图</h3><div class="screenshots">${app.screenshots.map((picture, index) => `<button type="button" data-image="${escapeHtml(picture)}" data-image-group="${escapeHtml(screenshotGroup)}" data-image-index="${index}" data-caption="${escapeHtml(app.title)}" aria-label="放大应用截图 ${index + 1}"><img src="${escapeHtml(imageUrl(picture))}" alt="应用截图 ${index + 1}" loading="lazy" /></button>`).join("")}</div></section>` : ""}<section class="detail-section"><h3>相关动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
   } catch (error) {
     appDialogBody.innerHTML = emptyState("warning-circle", "应用详情加载失败", error.message);
   }
 }
 
-async function openTopic(tag) {
-  if (!tag) return;
+async function openTopic(value) {
+  const source = publicSourceKey(value);
+  if (!source) return;
+  const requestId = ++state.detailRequests.topic;
   topicDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取话题详情…</span></div>`;
   showDialog(topicDialog);
   try {
-    const payload = await api(`/api/web/topics/${encodeURIComponent(tag)}?page=1`);
+    const payload = await api(`/api/web/topics/${encodeURIComponent(source)}?page=1&sort=dateline_desc`);
+    if (requestId !== state.detailRequests.topic || !topicDialog.open) return;
     const topic = payload.topic;
     const monitored = state.topics.some((item) => item.sourceKey === topic.sourceKey || item.tag === topic.tag);
-    topicDialogBody.innerHTML = `<section class="topic-detail-hero">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" />` : `<span><i class="ph ph-hash"></i></span>`}<h2>${escapeHtml(topic.title || topic.tag)}</h2><p>${escapeHtml(stripHtml(topic.description || topic.intro || "公开话题"))}</p><div class="profile-stats"><span><strong>${compactNumber(topic.followers)}</strong><small>关注</small></span><span><strong>${compactNumber(topic.posts)}</strong><small>动态</small></span><span><strong>${compactNumber(topic.hot)}</strong><small>热度</small></span></div><div class="detail-actions"><button class="btn ${topic.followed ? "secondary active" : "primary"}" type="button" data-topic-follow="${escapeHtml(topic.tag)}" data-followed="${topic.followed ? "1" : "0"}"><i class="ph ph-${topic.followed ? "check" : "plus"}"></i>${topic.followed ? "已关注" : "关注话题"}</button><button class="btn secondary" type="button" data-monitor-add="${escapeHtml(topic.sourceKey || topic.tag)}" ${monitored ? "disabled" : ""}><i class="ph ph-radar"></i>${monitored ? "已加入监控" : "加入监控"}</button></div></section><section class="detail-section"><h3>最新动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
+    const isProduct = topic.sourceType === "product";
+    state.topicDetail = { source: topic.sourceKey || source, sort: "dateline_desc", page: 1, feeds: payload.feeds || [], requestId };
+    topicDialogBody.innerHTML = `<section class="topic-detail-hero">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" />` : `<span><i class="ph ph-${isProduct ? "cube" : "hash"}"></i></span>`}<small class="detail-kicker">${isProduct ? "数码产品" : "社区话题"}</small><h2>${escapeHtml(topic.title || topic.tag)}</h2><p>${escapeHtml(stripHtml(topic.description || topic.intro || (isProduct ? "酷安数码产品讨论" : "公开话题")))}</p><div class="profile-stats"><span><strong>${compactNumber(topic.followers)}</strong><small>关注</small></span><span><strong>${compactNumber(topic.posts)}</strong><small>动态</small></span><span><strong>${compactNumber(topic.hot)}</strong><small>热度</small></span></div><div class="detail-actions">${isProduct ? "" : `<button class="btn ${topic.followed ? "secondary active" : "primary"}" type="button" data-topic-follow="${escapeHtml(topic.tag)}" data-followed="${topic.followed ? "1" : "0"}"><i class="ph ph-${topic.followed ? "check" : "plus"}"></i>${topic.followed ? "已关注" : "关注话题"}</button>`}<button class="btn secondary" type="button" data-monitor-add="${escapeHtml(topic.sourceKey || topic.tag)}" ${monitored ? "disabled" : ""}><i class="ph ph-radar"></i>${monitored ? "已加入监控" : "加入监控"}</button></div></section>
+      <nav class="detail-tabs topic-sort-tabs" aria-label="${isProduct ? "产品讨论" : "话题动态"}排序"><button class="active" type="button" data-topic-sort="dateline_desc">最新发布</button><button type="button" data-topic-sort="lastupdate_desc">最近回复</button><button type="button" data-topic-sort="popular">热门内容</button></nav>
+      <section class="detail-section"><header class="comments-head"><h3 id="topicFeedHeading">最新发布</h3><span id="topicPageStatus">第 1 页</span></header><div id="topicFeedRegion">${feedStream(payload.feeds, { compact: true })}</div><div class="load-more"><button class="btn secondary" type="button" data-topic-load-more ${payload.feeds?.length ? "" : "disabled"}><i class="ph ph-plus-circle"></i>加载更多动态</button></div></section>`;
   } catch (error) {
+    if (requestId !== state.detailRequests.topic) return;
     topicDialogBody.innerHTML = emptyState("warning-circle", "话题详情加载失败", error.message);
+  }
+}
+
+async function loadTopicContent(sort = state.topicDetail.sort, { append = false } = {}) {
+  const region = $("#topicFeedRegion");
+  const more = $("[data-topic-load-more]");
+  if (!region || !state.topicDetail.source) return;
+  const requestId = ++state.detailRequests.topic;
+  const nextPage = append && sort === state.topicDetail.sort ? state.topicDetail.page + 1 : 1;
+  $$("[data-topic-sort]", topicDialogBody).forEach((button) => {
+    const active = button.dataset.topicSort === sort;
+    button.classList.toggle("active", active);
+    button.disabled = true;
+  });
+  if (!append) region.innerHTML = skeletonFeeds(2);
+  if (more) {
+    delete more.dataset.retrySort;
+    delete more.dataset.retryAppend;
+    more.disabled = true;
+    more.innerHTML = `<i class="ph ph-circle-notch"></i>正在加载`;
+  }
+  try {
+    const payload = await api(`/api/web/topics/${encodeURIComponent(state.topicDetail.source)}?page=${nextPage}&sort=${encodeURIComponent(sort)}`);
+    if (requestId !== state.detailRequests.topic || !topicDialog.open) return;
+    const previousCount = state.topicDetail.feeds.length;
+    const feeds = append
+      ? [...new Map([...state.topicDetail.feeds, ...(payload.feeds || [])].map((feed) => [String(feed.id), feed])).values()]
+      : payload.feeds || [];
+    const addedCount = append ? feeds.length - previousCount : feeds.length;
+    state.topicDetail = { ...state.topicDetail, sort, page: nextPage, feeds, requestId };
+    region.innerHTML = feedStream(feeds, { compact: true });
+    const labels = { dateline_desc: "最新发布", lastupdate_desc: "最近回复", popular: "热门内容" };
+    $("#topicFeedHeading").textContent = labels[sort] || "话题动态";
+    $("#topicPageStatus").textContent = `第 ${nextPage} 页 · ${feeds.length} 条`;
+    if (more) {
+      more.disabled = addedCount <= 0;
+      more.innerHTML = more.disabled
+        ? `<i class="ph ph-check"></i>没有更多动态`
+        : `<i class="ph ph-plus-circle"></i>加载更多动态`;
+    }
+  } catch (error) {
+    if (requestId !== state.detailRequests.topic) return;
+    if (!append) region.innerHTML = `<div class="inline-error">${escapeHtml(error.message)}</div>`;
+    toast(error.message, "error");
+    if (more) {
+      more.disabled = false;
+      more.dataset.retrySort = sort;
+      more.dataset.retryAppend = append ? "1" : "0";
+      more.innerHTML = `<i class="ph ph-arrow-clockwise"></i>重新加载`;
+    }
+  } finally {
+    if (requestId === state.detailRequests.topic) {
+      $$("[data-topic-sort]", topicDialogBody).forEach((button) => { button.disabled = false; });
+    }
   }
 }
 
@@ -1455,30 +1752,131 @@ function pointerDistance(points) {
   return first && second ? Math.hypot(second.x - first.x, second.y - first.y) : 0;
 }
 
-function handleSmartLink(value) {
-  const link = String(value || "");
-  if (link.startsWith("channel:")) return loadHomeChannel(link.slice(8));
-  if (link.startsWith("#/")) {
-    location.hash = link;
+function isCoolapkPageTarget(value) {
+  const target = String(value || "").trim();
+  return [
+    /^#\/feed\/(?:digestList|multiTagFeedList|headlineV8List|coolPictureList|ershouList|mediaList|targetFeedList)(?:\?|$)/,
+    /^#\/topic\/(?:hotTagList|tagList|userFollowTagList)(?:\?|$)/,
+    /^#\/product\/unreleasedProductList(?:\?|$)/,
+    /^#\/article\/(?:articlesList|includeFeedList)(?:\?|$)/,
+    /^#\/apk\/(?:apkStatList|appList|realRankList)(?:\?|$)/,
+    /^\/apk\/(?:categoryList|recommendList|updateList)(?:\?|$)/,
+    /^\/product\/categoryList(?:\?|$)/,
+    /^\/ershou\/(?:ershouProductBrandList|location)(?:\?|$)/,
+    /^\/album\/\d{1,20}(?:\?|$)/,
+  ].some((pattern) => pattern.test(target));
+}
+
+function openChannelPage(source, title = "酷安专题") {
+  location.hash = `#/channel?source=${encodeURIComponent(source)}&title=${encodeURIComponent(title || "酷安专题")}`;
+}
+
+function handleSmartLink(value, trigger = null) {
+  const link = String(value || "").trim();
+  const linkTitle = String(trigger?.dataset?.linkTitle || trigger?.textContent || "酷安内容").trim().replace(/\s+/g, " ").slice(0, 80);
+  if (!link) {
+    toast("该入口暂时没有可用链接", "error");
     return;
   }
-  const topic = link.match(/^\/t\/(.+)/);
-  if (topic) return openTopic(decodeURIComponent(topic[1].split("?")[0]));
-  const feed = link.match(/^\/feed\/(\d+)/);
-  if (feed) return openFeed(feed[1]);
-  const app = link.match(/^\/(?:apk|game)\/(.+)/);
-  if (app) {
-    toast("正在通过应用列表匹配该应用，可使用全局搜索继续查找");
-    location.hash = `#/search?q=${encodeURIComponent(app[1])}`;
-    return;
-  }
-  const pageKey = new URLSearchParams(link.split("?")[1] || "").get("url");
-  if (pageKey && PAGE_CHANNELS[pageKey]) {
-    const channel = PAGE_CHANNELS[pageKey];
-    if (channel === "topics" || channel === "apps") location.hash = `#/${channel}`;
-    else if (state.route === "home") loadHomeChannel(channel);
+  if (link.startsWith("channel:")) {
+    const channel = link.slice(8);
+    if (!HOME_CHANNELS.some((item) => item.key === channel)) {
+      toast("该内容频道暂未接入", "error");
+      return;
+    }
+    if (state.route === "home") loadHomeChannel(channel);
     else location.hash = `#/home?channel=${encodeURIComponent(channel)}`;
+    return;
   }
+  if (/^[A-Za-z][A-Za-z0-9_]{2,99}$/.test(link)) {
+    openChannelPage(link, linkTitle);
+    return;
+  }
+  if (/^searchSpot:\/\/ershou/i.test(link)) {
+    location.hash = `#/search?q=${encodeURIComponent(linkTitle || "二手")}`;
+    return;
+  }
+
+  // Coolapk occasionally returns an in-app hash route instead of a regular URL.
+  // Resolve its page payload here before the generic local-route branch.
+  let normalizedLink = link;
+  if (/^#\/page(?:\?|$)/.test(normalizedLink)) normalizedLink = normalizedLink.slice(1);
+  if (normalizedLink.startsWith("#/")) {
+    const routeName = normalizedLink.slice(2).split(/[/?]/)[0];
+    if (["home", "discover", "apps", "topics", "notifications", "account", "monitor", "ai", "settings", "search", "channel"].includes(routeName)) {
+      location.hash = normalizedLink;
+    } else if (isCoolapkPageTarget(normalizedLink)) {
+      openChannelPage(normalizedLink, linkTitle);
+    } else {
+      toast(`“${linkTitle}”尚未提供可识别的站内页面`, "error");
+    }
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(normalizedLink, location.origin);
+  } catch {
+    toast(`“${linkTitle}”的链接格式无效`, "error");
+    return;
+  }
+  const path = parsed.pathname.replace(/\/+$/, "") || "/";
+  if (path === "/feed/writer") {
+    const tag = parsed.searchParams.get("tag");
+    openComposer("feed");
+    if (state.account?.configured && tag) {
+      const textarea = $("#composeMessage");
+      textarea.value = `#${tag}# `;
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    return;
+  }
+  const pageKey = parsed.searchParams.get("url");
+  if ((path === "/page" || path === "/") && pageKey) {
+    if (isCoolapkPageTarget(pageKey)) {
+      openChannelPage(pageKey, linkTitle);
+      return;
+    }
+    if (!/^[A-Za-z][A-Za-z0-9_]{2,99}$/.test(pageKey)) {
+      toast(`“${linkTitle}”的页面标识无效`, "error");
+      return;
+    }
+    const channel = PAGE_CHANNELS[pageKey];
+    if (channel === "topics" || channel === "apps") {
+      location.hash = `#/${channel}`;
+    } else if (channel && HOME_CHANNELS.some((item) => item.key === channel)) {
+      if (state.route === "home") loadHomeChannel(channel);
+      else location.hash = `#/home?channel=${encodeURIComponent(channel)}`;
+    } else {
+      openChannelPage(pageKey, linkTitle);
+    }
+    return;
+  }
+
+  const relativeTarget = `${path}${parsed.search}`;
+  if (isCoolapkPageTarget(relativeTarget)) {
+    openChannelPage(relativeTarget, linkTitle);
+    return;
+  }
+  const topic = path.match(/^\/t\/(.+)/);
+  if (topic) return openTopic(`topic:${decodeURIComponent(topic[1])}`);
+  const product = path.match(/^\/product\/([^/]+)/);
+  if (product) return openTopic(`product:${decodeURIComponent(product[1])}`);
+  const feed = path.match(/^\/feed\/(\d+)/);
+  if (feed) return openFeed(feed[1]);
+  const user = path.match(/^\/u\/([^/]+)/);
+  if (user) return openUser(decodeURIComponent(user[1]));
+  const collection = path.match(/^\/collection\/([^/]+)/);
+  if (collection) return openCollection(decodeURIComponent(collection[1]));
+  const app = path.match(/^\/(?:apk|game)\/(.+)/);
+  if (app) {
+    const appKey = decodeURIComponent(app[1]);
+    if (/^\d+$/.test(appKey)) return openApp(appKey);
+    location.hash = `#/search?q=${encodeURIComponent(appKey)}`;
+    toast(`正在站内搜索“${linkTitle || appKey}”`);
+    return;
+  }
+  toast(`“${linkTitle}”暂未匹配到可用的站内页面`, "error");
 }
 
 document.addEventListener("click", async (event) => {
@@ -1488,7 +1886,20 @@ document.addEventListener("click", async (event) => {
   if (target.matches("[data-retry], [data-route-refresh]")) route({ force: true });
   if (target.matches("[data-home-channel]")) loadHomeChannel(target.dataset.homeChannel);
   if (target.matches("[data-hero-index]")) target.closest("#heroCarousel")?._showSlide?.(Number(target.dataset.heroIndex));
-  if (target.matches("[data-smart-link]")) handleSmartLink(target.dataset.smartLink);
+  if (target.matches("[data-smart-link]")) {
+    event.preventDefault();
+    handleSmartLink(target.dataset.smartLink, target);
+  }
+  if (target.matches("[data-home-load-more]") && !target.disabled) loadHomeChannel(state.home.channel, { append: true, updateUrl: false });
+  if (target.matches("[data-home-retry]")) loadHomeChannel(state.home.channel, { force: true, updateUrl: false });
+  if (target.matches("[data-channel-load-more]") && !target.disabled) loadMoreChannelPage();
+  if (target.matches("[data-topic-sort]") && !target.disabled) loadTopicContent(target.dataset.topicSort);
+  if (target.matches("[data-topic-load-more]") && !target.disabled) {
+    const retrySort = target.dataset.retrySort;
+    loadTopicContent(retrySort || state.topicDetail.sort, {
+      append: retrySort ? target.dataset.retryAppend === "1" : true,
+    });
+  }
   if (target.matches("[data-feed]")) openFeed(target.dataset.feed);
   if (target.matches("[data-app]")) openApp(target.dataset.app);
   if (target.matches("[data-public-topic]")) openTopic(target.dataset.publicTopic);
@@ -1576,6 +1987,7 @@ document.addEventListener("click", async (event) => {
     try {
       await api("/api/refresh", { method: "POST" });
       state.channelCache.clear();
+      state.pageCache.clear();
       await loadBaseState();
       toast("全部监控源已完成抓取", "success");
       await route({ force: true });

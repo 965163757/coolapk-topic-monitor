@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appSummary, collectEntities, collectionSummary, messageSummary, notificationSummary, pageDecorations, relationshipUserSource, sessionCookieHeader, webChannelConfig, webChannels } from "../lib/web-client.js";
+import { appSummary, collectEntities, collectionSummary, messageSummary, normalizePageKey, normalizePageTarget, notificationSummary, pageDecorations, relationshipUserSource, sessionCookieHeader, webChannelConfig, webChannels } from "../lib/web-client.js";
 
 test("exposes only supported web channels", () => {
   assert.ok(webChannels().some((item) => item.key === "home"));
   assert.equal(webChannelConfig("digital").params.url, "V10_DIGITAL_HOME");
   assert.equal(webChannelConfig("../../account"), null);
+  for (const channel of webChannels()) {
+    const pageKey = webChannelConfig(channel.key)?.params?.url;
+    if (pageKey) assert.equal(normalizePageKey(pageKey), pageKey);
+  }
 });
 
 test("collects nested entities and normalizes apps", () => {
@@ -30,12 +34,72 @@ test("selects the related user from Coolapk relationship rows", () => {
 
 test("extracts banners and shortcuts from page cards", () => {
   const data = [
-    { entityType: "card", entityTemplate: "imageCarouselCard_1", entities: [{ title: "活动", pic: "https://image.coolapk.com/a.jpg", url: "/t/活动" }] },
-    { entityType: "card", entityTemplate: "iconLinkGridCard", entities: [{ title: "值得看", pic: "https://image.coolapk.com/b.png", url: "/page?url=V8" }] },
+    { entityType: "card", entityTemplate: "imageCarouselCard_1", entities: [{ title: "今日酷安", pic: "https://image.coolapk.com/a.jpg", url: "/page?url=V8_JINRI_20260730" }] },
+    {
+      entityType: "card",
+      entityTemplate: "iconLinkGridCard",
+      entities: [{ title: "热闻", pic: "https://image.coolapk.com/b.png", url: "/page?url=V8_JINRI_NEWS" }],
+    },
+    {
+      entityType: "card",
+      entityTemplate: "iconTabLinkGridCard",
+      entities: [{ title: "热门", url: "#/feed/digestList?orderBy=replynum&filterId=60" }],
+    },
   ];
   const result = pageDecorations(data);
-  assert.equal(result.banners[0].title, "活动");
-  assert.equal(result.shortcuts[0].title, "值得看");
+  assert.equal(result.banners[0].title, "今日酷安");
+  assert.equal(result.banners[0].url, "/page?url=V8_JINRI_20260730");
+  assert.deepEqual(result.shortcuts.map((item) => item.title), ["热闻", "热门"]);
+  assert.equal(result.shortcuts[0].url, "/page?url=V8_JINRI_NEWS");
+  assert.equal(result.shortcuts[1].url, "#/feed/digestList?orderBy=replynum&filterId=60");
+});
+
+test("accepts safe Coolapk page keys only", () => {
+  assert.equal(normalizePageKey("V8_ZHUANTI_20180327"), "V8_ZHUANTI_20180327");
+  assert.equal(normalizePageKey("  V8_JINRI_20260730  "), "V8_JINRI_20260730");
+  assert.equal(normalizePageKey("abc"), "abc");
+  for (const invalid of [
+    "",
+    "V8",
+    "../../account",
+    "%2e%2e%2faccount",
+    "#/feed/list",
+    "/page?url=V8_JINRI_NEWS",
+    "V8_JINRI_NEWS&page=2",
+    "V8-JINRI-NEWS",
+    `V${"A".repeat(100)}`,
+  ]) {
+    assert.equal(normalizePageKey(invalid), "", `expected ${invalid} to be rejected`);
+  }
+});
+
+test("accepts allowlisted Coolapk in-app page targets", () => {
+  for (const target of [
+    "#/feed/digestList?type=10&message_status=all",
+    "#/feed/multiTagFeedList?title=%E7%A7%91%E6%8A%80",
+    "#/feed/headlineV8List?filterId=0",
+    "#/feed/coolPictureList?listType=hot&buildCard=1",
+    "#/topic/tagList?keywords=%E7%8E%A9%E6%9C%BA",
+    "#/product/unreleasedProductList?sortField=wish_count",
+    "#/article/includeFeedList?dyhId=4829",
+    "#/apk/realRankList?apkType=1",
+    "/apk/categoryList?apkType=1",
+    "/product/categoryList?id=1000",
+    "/ershou/location",
+    "/album/23084193",
+  ]) {
+    assert.equal(normalizePageTarget(target), target);
+  }
+  for (const invalid of [
+    "#/account",
+    "#/feed/../../account",
+    "#/feed/%2e%2e/account",
+    "/api/settings",
+    "https://example.com/page",
+    "searchSpot://ershou",
+  ]) {
+    assert.equal(normalizePageTarget(invalid), "");
+  }
 });
 
 test("builds a safe Coolapk session cookie", () => {
