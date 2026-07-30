@@ -5,10 +5,12 @@ import { appSummary, collectEntities, collectionSummary, messageSummary, normali
 test("exposes only supported web channels", () => {
   assert.ok(webChannels().some((item) => item.key === "home"));
   assert.equal(webChannelConfig("digital").params.url, "V10_DIGITAL_HOME");
+  assert.match(webChannelConfig("ratings").params.url, /rankType=rating/);
+  assert.equal(webChannelConfig("second_hand").params.url, "#/feed/ershouList");
   assert.equal(webChannelConfig("../../account"), null);
   for (const channel of webChannels()) {
-    const pageKey = webChannelConfig(channel.key)?.params?.url;
-    if (pageKey) assert.equal(normalizePageKey(pageKey), pageKey);
+    const pageTarget = webChannelConfig(channel.key)?.params?.url;
+    if (pageTarget) assert.equal(normalizePageTarget(pageTarget), pageTarget);
   }
 });
 
@@ -84,9 +86,9 @@ test("accepts allowlisted Coolapk in-app page targets", () => {
     "#/article/includeFeedList?dyhId=4829",
     "#/apk/realRankList?apkType=1",
     "/apk/categoryList?apkType=1",
+    "/apk/category?title=%E7%B3%BB%E7%BB%9F%E5%B7%A5%E5%85%B7&catId=5&apkType=1",
     "/product/categoryList?id=1000",
-    "/ershou/location",
-    "/album/23084193",
+    "/product/categoryDetailList?type=category&id=1000",
   ]) {
     assert.equal(normalizePageTarget(target), target);
   }
@@ -97,9 +99,34 @@ test("accepts allowlisted Coolapk in-app page targets", () => {
     "/api/settings",
     "https://example.com/page",
     "searchSpot://ershou",
+    "/ershou/location",
+    "/album/23084193",
   ]) {
     assert.equal(normalizePageTarget(invalid), "");
   }
+});
+
+test("preserves category and product-brand directories from generic pages", () => {
+  const result = pageDecorations([
+    {
+      id: 5,
+      entityType: "category",
+      title: "系统工具",
+      logo: "https://image.coolapk.com/category.png",
+      tags: "输入法,文件管理",
+      url: "/apk/category?catId=5&apkType=1",
+    },
+    {
+      id: 1000,
+      entityType: "productBrand",
+      title: "手机",
+      product_num: 1799,
+      url: "/page?url=%2Fproduct%2FcategoryDetailList%3Ftype%3Dcategory%26id%3D1000",
+    },
+  ]);
+  assert.equal(result.directories.length, 2);
+  assert.equal(result.directories[0].subtitle, "输入法,文件管理");
+  assert.equal(result.directories[1].subtitle, "1799 个产品");
 });
 
 test("builds a safe Coolapk session cookie", () => {

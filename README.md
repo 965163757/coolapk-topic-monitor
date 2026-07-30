@@ -4,7 +4,15 @@
 
 服务每 5 分钟按发布时间增量采集监控话题，数据去重后写入长期归档。每个话题都可在关键词判断与 AI 判断中二选一；AI 可结合正文和图片给出 0–100% 的匹配度，达到阈值后进入飞书通知流程。
 
-当前版本：**3.4.2**
+当前版本：**4.0.1**
+
+## 4.0.1 稳定性与安全更新
+
+- 修复热门动态、评分频道和二手频道的失效上游入口，并给发现页增加 TTL/过期可用缓存。
+- 增加完整的站点访问口令、服务端会话和锁定入口；生产环境启用后，全部业务 API 均要求登录。
+- 搜索分页不再重复混入整份本地归档，分类与产品品牌页保留有效目录实体。
+- AI 连接测试使用尚未保存的当前表单配置，连接探针保持纯文本并兼容多种 OpenAI-compatible 协议。
+- 统一页码、畸形 URL 和上游异常响应契约；新增带模拟上游的 HTTP 集成回归测试。
 
 ## 3.4.2 图片体验与 CDN 更新
 
@@ -74,6 +82,8 @@ npm start
 ```powershell
 $env:PORT=4173
 $env:POLL_INTERVAL_MS=300000
+$env:APP_ACCESS_TOKEN="GENERATE_A_STRONG_RANDOM_VALUE"
+$env:APP_ACCESS_SESSION_TTL_SECONDS=604800
 $env:IMAGE_MEMORY_CACHE_BYTES=50331648
 $env:IMAGE_DISK_CACHE_BYTES=536870912
 $env:IMAGE_DISK_CACHE_ENTRIES=2000
@@ -91,6 +101,8 @@ $env:COOLAPK_USERNAME="COOLAPK_USERNAME"
 $env:COOLAPK_TOKEN="COOLAPK_TOKEN"
 npm start
 ```
+
+设置 `APP_ACCESS_TOKEN` 后，浏览器首次打开会显示访问口令页。口令仅用于换取 `HttpOnly; SameSite=Strict` 服务端会话 Cookie，不会写入前端存储；未设置该变量时保持本地开发模式。
 
 酷安会话也可在“账号中心”导入。页面只显示 Token 掩码，完整会话仅存放在服务器 `data/settings.json`；环境变量的优先级更高。
 
@@ -166,7 +178,7 @@ npm start
 - `GET /api/feeds/:id`：动态完整详情及第一页评论
 - `GET /api/feeds/:id/replies?page=2`：分页评论
 - `GET /api/image?url=图片地址&w=720&q=78&format=webp`：带尺寸转换、两级缓存、长期客户端/CDN 缓存与条件请求的酷安图片代理
-- `GET /api/search/feeds?q=关键词&sort=created_desc`：帖子搜索（远端候选、监控缓存和归档联合检索）
+- `GET /api/search/feeds?q=关键词&sort=dateline_desc|lastupdate_desc|popular`：帖子搜索（远端候选、监控缓存和归档联合检索）
 - `GET /api/discovery/feeds?mode=recent|hot`：全站新鲜或热门动态
 - `GET /api/search/users?q=关键词`：用户搜索
 - `GET /api/users/:uid`：用户公开主页与本地历史动态

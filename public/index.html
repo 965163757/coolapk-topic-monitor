@@ -8,9 +8,9 @@
     <title>酷窗 · 酷安 Web 工作台</title>
     <link rel="preload" href="/vendor/phosphor/regular/Phosphor.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/vendor/phosphor/regular/style.css" />
-    <link rel="stylesheet" href="/styles.css?v=4.0.0-final5" />
-    <link rel="stylesheet" href="/styles-v4.css?v=4.0.0-final5" />
-    <script type="module" src="/app.js?v=4.0.0-final5" fetchpriority="high"></script>
+    <link rel="stylesheet" href="/styles.css?v=4.0.1" />
+    <link rel="stylesheet" href="/styles-v4.css?v=4.0.1" />
+    <script type="module" src="/app.js?v=4.0.1" fetchpriority="high"></script>
   </head>
   <body>
     <a class="skip-link" href="#viewHost">跳到主要内容</a>
@@ -78,6 +78,9 @@
                   <button class="header-menu-action compact-menu-action" type="button" data-header-action="theme" aria-label="切换深色模式">
                     <i class="ph ph-moon" aria-hidden="true"></i><span>深色模式</span>
                   </button>
+                  <button class="header-menu-action compact-menu-action" type="button" data-header-action="lock">
+                    <i class="ph ph-lock-key" aria-hidden="true"></i><span>锁定网站</span>
+                  </button>
                   <a class="header-menu-action mobile-only-action" href="#/account" data-nav="account">
                     <i class="ph ph-user-circle" aria-hidden="true"></i><span>账号</span>
                   </a>
@@ -112,6 +115,28 @@
         </nav>
       </div>
     </div>
+
+    <dialog class="access-dialog" id="accessDialog" aria-labelledby="accessTitle" aria-describedby="accessDescription">
+      <form class="access-card" id="accessForm">
+        <span class="access-mark" aria-hidden="true"><i class="ph ph-lightning"></i></span>
+        <div class="access-copy">
+          <span class="eyebrow">COOL WINDOW</span>
+          <h1 id="accessTitle">进入酷窗</h1>
+          <p id="accessDescription">输入网站访问口令</p>
+        </div>
+        <label class="access-field">
+          <span>访问口令</span>
+          <span class="access-input-wrap">
+            <i class="ph ph-key" aria-hidden="true"></i>
+            <input id="accessToken" name="token" type="password" autocomplete="current-password" required aria-describedby="accessStatus" />
+          </span>
+        </label>
+        <button class="access-submit" id="accessSubmit" type="submit">
+          <span>进入工作台</span><i class="ph ph-arrow-right" aria-hidden="true"></i>
+        </button>
+        <p class="access-status" id="accessStatus" role="status" aria-live="polite"></p>
+      </form>
+    </dialog>
 
     <dialog class="sheet-dialog feed-dialog" id="feedDialog">
       <header class="dialog-bar">

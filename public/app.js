@@ -18,6 +18,8 @@ const ruleDialog = $("#ruleDialog");
 const lightbox = $("#lightbox");
 const lightboxImage = $("#lightboxImage");
 const lightboxStage = $("#lightboxStage");
+const accessDialog = $("#accessDialog");
+const accessForm = $("#accessForm");
 
 const state = {
   route: "home",
@@ -69,6 +71,12 @@ const state = {
     pinchDistance: 0,
     pinchZoom: 1,
   },
+  access: {
+    enabled: false,
+    authenticated: true,
+    initialized: false,
+    waiters: [],
+  },
 };
 
 const numberFormat = new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
@@ -110,11 +118,51 @@ const HOME_CHANNELS = [
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败（HTTP ${response.status}）`);
+  if (!response.ok) {
+    if (response.status === 401 && payload.code === "AUTH_REQUIRED") {
+      state.access.enabled = true;
+      state.access.authenticated = false;
+      showAccessGate(payload.error);
+    }
+    const error = new Error(payload.error || `请求失败（HTTP ${response.status}）`);
+    error.code = payload.code || "";
+    error.status = response.status;
+    throw error;
+  }
   return payload;
+}
+
+function showAccessGate(message = "") {
+  if (!accessDialog) return;
+  const status = $("#accessStatus");
+  if (status) status.textContent = message;
+  if (!accessDialog.open) accessDialog.showModal();
+  requestAnimationFrame(() => $("#accessToken")?.focus());
+}
+
+function waitForAccess() {
+  showAccessGate();
+  return new Promise((resolve) => state.access.waiters.push(resolve));
+}
+
+async function ensureAccess() {
+  try {
+    const response = await fetch("/api/auth/status", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return;
+    state.access.enabled = Boolean(payload.enabled);
+    state.access.authenticated = Boolean(payload.authenticated);
+    if (state.access.enabled && !state.access.authenticated) await waitForAccess();
+  } catch {
+    // The regular page loaders surface connectivity errors with their retry UI.
+  }
 }
 
 function escapeHtml(value = "") {
@@ -465,6 +513,15 @@ function renderEditorialSections(sections = []) {
   }).join("");
 }
 
+function renderDirectories(items = []) {
+  if (!items.length) return "";
+  return `
+    <section class="surface editorial-section channel-inline-section">
+      <header class="surface-head"><div><h3>浏览分类</h3><p>选择分类继续在站内浏览</p></div><span>${items.length}</span></header>
+      <div class="editorial-grid">${items.slice(0, 50).map((item, index) => `<button type="button" data-smart-link="${escapeHtml(item.url)}" data-link-title="${escapeHtml(item.title)}" aria-label="打开：${escapeHtml(item.title)}">${item.picture ? imageMarkup(item.picture, { width: 160, quality: 72 }) : `<span>${String(index + 1).padStart(2, "0")}</span>`}<div><strong>${escapeHtml(item.title)}</strong>${item.subtitle ? `<p>${escapeHtml(item.subtitle)}</p>` : ""}</div><i class="ph ph-caret-right"></i></button>`).join("")}</div>
+    </section>`;
+}
+
 function homeChannelMeta(channel) {
   return HOME_CHANNELS.find((item) => item.key === channel) || HOME_CHANNELS[0];
 }
@@ -555,7 +612,6 @@ async function route({ force = false } = {}) {
   document.body.dataset.route = parsed.route;
   setActiveNavigation(parsed.route);
   document.body.classList.remove("mobile-rail-open");
-  $("#mobileMenu")?.setAttribute("aria-expanded", "false");
   $("#mobileMenu")?.setAttribute("aria-expanded", "false");
   clearInterval(state.carouselTimer);
   const sequence = ++state.requestSequence;
@@ -849,6 +905,7 @@ function channelPageContent(data) {
     data.banners?.length ? renderHero(data.banners) : "",
     data.shortcuts?.length ? `<section class="surface home-shortcuts"><header class="surface-head"><div><h2>频道入口</h2><p>继续在站内打开分类与专题</p></div></header>${renderShortcuts(data.shortcuts)}</section>` : "",
     renderEditorialSections(data.sections),
+    renderDirectories(data.directories),
     data.feeds?.length ? `<section class="channel-result-section"><header class="surface-head"><div><h2>动态内容</h2><p>${data.feeds.length} 条公开内容</p></div></header><div id="channelPageFeeds">${feedStream(data.feeds)}</div></section>` : "",
     data.apps?.length ? `<section class="surface channel-entity-section"><header class="surface-head"><div><h2>应用与游戏</h2><p>${data.apps.length} 个结果</p></div></header><div class="entity-section-body">${appGrid(data.apps)}</div></section>` : "",
     data.topics?.length ? `<section class="surface channel-entity-section"><header class="surface-head"><div><h2>话题与产品</h2><p>${data.topics.length} 个结果</p></div></header><div class="entity-section-body">${topicGrid(data.topics)}</div></section>` : "",
@@ -858,7 +915,7 @@ function channelPageContent(data) {
 }
 
 function channelResultCount(data = {}) {
-  return ["feeds", "apps", "topics", "users", "shortcuts", "sections", "banners"]
+  return ["feeds", "apps", "topics", "users", "shortcuts", "sections", "banners", "directories"]
     .reduce((total, key) => total + (Array.isArray(data[key]) ? data[key].length : 0), 0);
 }
 
@@ -874,6 +931,7 @@ function mergeChannelPageData(current = {}, next = {}) {
     topics: uniqueBy([...(current.topics || []), ...(next.topics || [])], "sourceKey"),
     users: uniqueBy([...(current.users || []), ...(next.users || [])], "uid"),
     sections: uniqueBy([...(current.sections || []), ...(next.sections || [])], "title"),
+    directories: uniqueBy([...(current.directories || []), ...(next.directories || [])], "url"),
   };
 }
 
@@ -1322,12 +1380,19 @@ async function renderSearch({ sequence }) {
     viewHost.innerHTML = `<section class="page"><section class="search-hero"><h1>搜索整个酷安工作台</h1><p>帖子、话题、用户和应用，一次搜索统一展示</p><form class="search-page-form" id="pageSearchForm"><i class="ph ph-magnifying-glass"></i><input id="pageSearchInput" type="search" autofocus placeholder="输入搜索关键词" /><button type="submit">开始搜索</button></form></section>${emptyState("magnifying-glass", "输入关键词开始", "例如：鸿蒙、Bug 价、哔哩哔哩或用户昵称。")}</section>`;
     return;
   }
-  const payload = await api(`/api/search/all?q=${encodeURIComponent(q)}&page=1`);
+  const requestedPage = Math.max(1, Math.min(50, Math.trunc(Number(state.routeParams.get("page"))) || 1));
+  const payload = await api(`/api/search/all?q=${encodeURIComponent(q)}&page=${requestedPage}`);
   if (sequence !== state.requestSequence) return;
+  const page = Number(payload.page || requestedPage);
+  const resultCount = ["feeds", "topics", "users", "apps"].reduce((total, key) => total + (payload[key]?.length || 0), 0);
+  const canLoadNext = payload.hasMore
+    ? Object.values(payload.hasMore).some(Boolean)
+    : resultCount > 0;
   viewHost.innerHTML = `<section class="page">
-    <section class="search-hero"><h1>搜索结果</h1><p>正在展示与“${escapeHtml(q)}”相关的公开内容</p><form class="search-page-form" id="pageSearchForm"><i class="ph ph-magnifying-glass"></i><input id="pageSearchInput" type="search" value="${escapeHtml(q)}" /><button type="submit">重新搜索</button></form></section>
+    <section class="search-hero"><h1>搜索结果</h1><p>“${escapeHtml(q)}” · 第 ${page} 页</p><form class="search-page-form" id="pageSearchForm"><i class="ph ph-magnifying-glass"></i><input id="pageSearchInput" type="search" value="${escapeHtml(q)}" /><button type="submit">重新搜索</button></form></section>
     <div class="filter-tabs" id="searchTabs"><button class="active" type="button" data-search-tab="all">全部</button><button type="button" data-search-tab="feeds">帖子 ${payload.feeds?.length || 0}</button><button type="button" data-search-tab="topics">话题 ${payload.topics?.length || 0}</button><button type="button" data-search-tab="users">用户 ${payload.users?.length || 0}</button><button type="button" data-search-tab="apps">应用 ${payload.apps?.length || 0}</button></div>
     <div id="searchResultsRegion" data-search-payload></div>
+    <nav class="pagination" aria-label="搜索结果分页"><button type="button" data-search-page="${page - 1}" ${page <= 1 ? "disabled" : ""}><i class="ph ph-caret-left"></i>上一页</button><span>第 ${page} 页</span><button type="button" data-search-page="${page + 1}" ${canLoadNext ? "" : "disabled"}>下一页<i class="ph ph-caret-right"></i></button></nav>
   </section>`;
   viewHost._searchPayload = payload;
   renderSearchTab("all");
@@ -1533,7 +1598,12 @@ async function loadUserSection(button) {
       content = userCards(payload.users || []);
     } else {
       payload = await api(`/api/users/${encodeURIComponent(uid)}/feeds?branch=${section}&page=1`);
-      content = feedStream(payload.feeds || [], { compact: true });
+      let sectionFeeds = payload.feeds || [];
+      if (section === "feed" && !sectionFeeds.length) {
+        const profilePayload = await api(`/api/users/${encodeURIComponent(uid)}`);
+        sectionFeeds = profilePayload.localFeeds || [];
+      }
+      content = feedStream(sectionFeeds, { compact: true });
     }
     const labels = { feed: "动态", htmlFeed: "文章", questionAndAnswer: "问答", collections: "收藏", followList: "关注", fansList: "粉丝" };
     region.innerHTML = `<h3>${labels[section] || "公开内容"}</h3>${content}`;
@@ -2072,10 +2142,8 @@ function isCoolapkPageTarget(value) {
     /^#\/product\/unreleasedProductList(?:\?|$)/,
     /^#\/article\/(?:articlesList|includeFeedList)(?:\?|$)/,
     /^#\/apk\/(?:apkStatList|appList|realRankList)(?:\?|$)/,
-    /^\/apk\/(?:categoryList|recommendList|updateList)(?:\?|$)/,
-    /^\/product\/categoryList(?:\?|$)/,
-    /^\/ershou\/(?:ershouProductBrandList|location)(?:\?|$)/,
-    /^\/album\/\d{1,20}(?:\?|$)/,
+    /^\/apk\/(?:category|categoryList|recommendList|updateList)(?:\?|$)/,
+    /^\/product\/(?:categoryList|categoryDetailList)(?:\?|$)/,
   ].some((pattern) => pattern.test(target));
 }
 
@@ -2276,6 +2344,11 @@ document.addEventListener("click", async (event) => {
     try { region.innerHTML = appGrid((await channelData("market")).apps); } catch (error) { region.innerHTML = `<div class="inline-error">${escapeHtml(error.message)}</div>`; }
   }
   if (target.matches("[data-search-tab]")) renderSearchTab(target.dataset.searchTab);
+  if (target.matches("[data-search-page]") && !target.disabled) {
+    const q = (state.routeParams.get("q") || "").trim();
+    const page = Math.max(1, Math.min(50, Number(target.dataset.searchPage) || 1));
+    location.hash = `#/search?q=${encodeURIComponent(q)}&page=${page}`;
+  }
   if (target.matches("[data-toggle-add-monitor]")) {
     const panel = $("#addMonitorPanel");
     if (panel) panel.hidden = !panel.hidden;
@@ -2534,6 +2607,48 @@ function applyTheme(theme) {
 
 $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 $("#composeTrigger").addEventListener("click", () => openComposer("feed"));
+accessDialog?.addEventListener("cancel", (event) => {
+  if (state.access.enabled && !state.access.authenticated) event.preventDefault();
+});
+accessForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const tokenInput = $("#accessToken");
+  const submit = $("#accessSubmit");
+  const status = $("#accessStatus");
+  const token = tokenInput?.value || "";
+  if (!token.trim()) {
+    status.textContent = "请输入访问口令";
+    tokenInput?.focus();
+    return;
+  }
+  submit.disabled = true;
+  status.textContent = "正在验证…";
+  try {
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `验证失败（HTTP ${response.status}）`);
+    state.access.enabled = Boolean(payload.enabled);
+    state.access.authenticated = Boolean(payload.authenticated);
+    status.textContent = "";
+    tokenInput.value = "";
+    accessDialog.close();
+    state.access.waiters.splice(0).forEach((resolve) => resolve());
+    if (state.access.initialized) {
+      await loadBaseState().catch(() => updateChrome(true));
+      await route({ force: true });
+    }
+  } catch (error) {
+    status.textContent = error.message;
+    tokenInput?.select();
+  } finally {
+    submit.disabled = false;
+  }
+});
 $$("[data-header-action]").forEach((button) => {
   button.addEventListener("click", async () => {
     const action = button.dataset.headerAction;
@@ -2547,6 +2662,17 @@ $$("[data-header-action]").forEach((button) => {
         await route({ force: true });
       } finally {
         button.classList.remove("loading");
+      }
+    }
+    if (action === "lock") {
+      try {
+        const payload = await api("/api/auth/logout", { method: "POST" });
+        state.access.enabled = Boolean(payload.enabled);
+        state.access.authenticated = Boolean(payload.authenticated);
+        if (state.access.enabled && !state.access.authenticated) showAccessGate("网站已锁定");
+        else toast("服务器未启用访问口令");
+      } catch (error) {
+        toast(error.message, "error");
       }
     }
   });
@@ -2737,6 +2863,7 @@ async function initialize() {
   applyTheme(preferredTheme);
   if (localStorage.getItem("coolweb:rail-collapsed") === "1") document.body.classList.add("rail-collapsed");
   if (!location.hash) history.replaceState(null, "", "#/home");
+  await ensureAccess();
   const initialRoute = parseRoute().route;
   const publicRoutes = new Set(["home", "channel", "discover", "apps", "topics", "search"]);
   let baseStateSettled = false;
@@ -2759,6 +2886,7 @@ async function initialize() {
     await loadState;
     await route();
   }
+  state.access.initialized = true;
 }
 
 initialize();

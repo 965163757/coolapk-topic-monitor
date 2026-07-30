@@ -81,6 +81,13 @@ test("keeps the fixed shell, dialog, rule and lightbox initialization IDs", () =
   ]);
 
   assertIds(indexHtml, "dialogs", [
+    "accessDialog",
+    "accessForm",
+    "accessTitle",
+    "accessDescription",
+    "accessToken",
+    "accessSubmit",
+    "accessStatus",
     "feedDialog",
     "feedDialogBody",
     "appDialog",
@@ -174,6 +181,9 @@ test("keeps homepage interaction hooks and every supported application route", (
     assert.match(indexHtml, new RegExp(`data-nav\\s*=\\s*(["'])${escapeRegExp(route)}\\1`), `missing data-nav hook for "${route}"`);
   }
   assert.match(appJs, /\[data-nav\]/, "navigation hooks must remain connected to app.js");
+  assert.match(appJs, /renderDirectories\(data\.directories\)/, "generic category pages must keep their directory entities");
+  assert.ok(appJs.includes("^\\/apk\\/(?:category|categoryList"), "application category links must remain in-app targets");
+  assert.match(appJs, /data-search-page/, "search results must expose working pagination controls");
 });
 
 test("horizontal header navigation and utility menus remain linked and accessible", () => {
@@ -216,7 +226,7 @@ test("horizontal header navigation and utility menus remain linked and accessibl
     assert.equal(attribute(link, "href"), `#/${route}`, `more menu "${route}" link is not usable`);
   }
 
-  for (const action of ["compose", "refresh", "theme"]) {
+  for (const action of ["compose", "refresh", "theme", "lock"]) {
     assert.ok(
       openingTags(moreBlock, "button").some((tag) => attribute(tag, "data-header-action") === action),
       `more menu is missing the compact "${action}" action`,
@@ -230,6 +240,9 @@ test("horizontal header navigation and utility menus remain linked and accessibl
   }
 
   assert.match(appJs, /Promise\.race\(\[loadState,\s*new Promise/, "home initialization must keep a bounded first render");
+  assert.match(appJs, /\/api\/auth\/status/, "frontend must check access authentication before loading protected APIs");
+  assert.match(appJs, /\/api\/auth\/login/, "frontend must provide an access login flow");
+  assert.match(appJs, /payload\.code\s*===\s*["']AUTH_REQUIRED["']/, "expired API sessions must reopen the access gate");
 });
 
 test("styles-v4 uses scoped transitions and honors responsive motion preferences when present", (context) => {
@@ -243,6 +256,7 @@ test("styles-v4 uses scoped transitions and honors responsive motion preferences
   const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
   assert.doesNotMatch(withoutComments, /\btransition\s*:\s*all\b/i, "avoid transition: all; enumerate animated properties");
   assert.match(withoutComments, /@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)/i);
+  assert.match(withoutComments, /\.settings-fields\s+\.toggle-row\s*>\s*input[\s\S]*?width\s*:\s*1px/i, "hidden settings toggles must not widen the page");
 
   const maxWidths = [...withoutComments.matchAll(/@media[^{]*\(\s*max-width\s*:\s*(\d+(?:\.\d+)?)px\s*\)/gi)]
     .map((match) => Number(match[1]));

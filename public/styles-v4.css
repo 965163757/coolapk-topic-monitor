@@ -1873,6 +1873,18 @@ img.image-ready {
   transition: background-color var(--duration-ui) ease, transform var(--duration-ui) var(--ease-out), box-shadow var(--duration-ui) ease;
 }
 
+.settings-fields .toggle-row > input,
+.form-row .toggle-row > input,
+.rule-fields .toggle-row > input {
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .mode-choice label > span {
   border-radius: 12px;
   transition: border-color var(--duration-ui) ease, background-color var(--duration-ui) ease, box-shadow var(--duration-ui) ease, transform var(--duration-ui) var(--ease-out);
@@ -2537,6 +2549,178 @@ img.image-ready {
 
   .home-feed-actions .share-action {
     display: none;
+  }
+}
+
+/* Private deployment access gate */
+
+.access-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-width: none;
+  padding: 0;
+  color: var(--ink);
+  border: 1px solid color-mix(in srgb, var(--line-strong) 78%, transparent);
+  border-radius: 24px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(24px) saturate(1.12);
+}
+
+.access-dialog[open] {
+  animation: access-card-in var(--duration-enter) var(--ease-out);
+}
+
+.access-dialog::backdrop {
+  background:
+    radial-gradient(circle at 50% 35%, rgb(20 152 102 / 18%), transparent 38%),
+    rgb(7 20 14 / 68%);
+  backdrop-filter: blur(12px);
+}
+
+.access-card {
+  display: grid;
+  padding: 38px;
+  gap: 22px;
+}
+
+.access-mark {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  color: #fff;
+  font-size: 27px;
+  border-radius: 17px;
+  background: linear-gradient(145deg, #24b77c, var(--green-strong));
+  box-shadow: 0 14px 32px rgb(20 152 102 / 28%);
+  place-items: center;
+}
+
+.access-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.access-copy .eyebrow {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .14em;
+}
+
+.access-copy h1,
+.access-copy p {
+  margin: 0;
+}
+
+.access-copy h1 {
+  font-size: 27px;
+  line-height: 1.2;
+  letter-spacing: -.025em;
+}
+
+.access-copy p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.access-field {
+  display: grid;
+  gap: 8px;
+}
+
+.access-field > span:first-child {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.access-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.access-input-wrap > i {
+  position: absolute;
+  z-index: 1;
+  left: 15px;
+  color: var(--faint);
+  font-size: 18px;
+  pointer-events: none;
+}
+
+.access-input-wrap input {
+  width: 100%;
+  height: 50px;
+  padding: 0 15px 0 44px;
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  background: var(--surface-2);
+  transition: border-color var(--duration-ui) ease, box-shadow var(--duration-ui) ease, background-color var(--duration-ui) ease;
+}
+
+.access-input-wrap input:focus {
+  border-color: var(--green);
+  background: var(--surface);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 12%, transparent);
+}
+
+.access-submit {
+  display: flex;
+  min-height: 50px;
+  padding: 0 17px;
+  align-items: center;
+  justify-content: space-between;
+  color: #fff;
+  font-weight: 760;
+  border-radius: 13px;
+  background: var(--green);
+  box-shadow: 0 10px 24px rgb(20 152 102 / 20%);
+  transition: transform var(--duration-fast) ease, background-color var(--duration-ui) ease, box-shadow var(--duration-ui) ease;
+}
+
+.access-submit:hover {
+  background: var(--green-strong);
+  box-shadow: 0 13px 28px rgb(20 152 102 / 26%);
+  transform: translateY(-1px);
+}
+
+.access-submit:active {
+  transform: translateY(0);
+}
+
+.access-submit:disabled {
+  cursor: wait;
+  opacity: .62;
+  transform: none;
+}
+
+.access-status {
+  min-height: 20px;
+  margin: -10px 0 0;
+  color: var(--red);
+  font-size: 13px;
+}
+
+@keyframes access-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 520px) {
+  .access-dialog {
+    width: calc(100vw - 24px);
+    border-radius: 21px;
+  }
+
+  .access-card {
+    padding: 28px 24px 24px;
   }
 }
 
