@@ -462,6 +462,10 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
 .detail-feed { padding: 24px clamp(18px, 4vw, 42px); }
 .detail-feed .feed-text { display: block; overflow: visible; font-size: 16px; white-space: pre-line; -webkit-line-clamp: unset; }
 .detail-feed .feed-images { grid-template-columns: repeat(2, 1fr); }
+.detail-feed-actions { flex-wrap: wrap; }
+.detail-subnav { display: flex; gap: 7px; padding: 12px clamp(18px, 4vw, 42px); overflow-x: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface-2); scrollbar-width: thin; }
+.detail-subnav button, .detail-subnav a { display: inline-flex; min-width: max-content; align-items: center; gap: 6px; padding: 8px 11px; color: var(--muted); font-size: 11px; font-weight: 700; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.detail-subnav button:hover, .detail-subnav a:hover { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
 .comments-section { padding: 0 clamp(18px, 4vw, 42px) 32px; }
 .comments-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 0 12px; border-top: 1px solid var(--line); }
 .comments-head h3 { margin: 0; font-size: 16px; }
@@ -478,7 +482,11 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
 .comment p { margin: 0; font-size: 13px; line-height: 1.65; white-space: pre-line; }
 .comment footer { display: flex; gap: 12px; color: var(--muted); font-size: 10px; }
 .nested-replies { display: grid; gap: 7px; margin-top: 3px; padding: 9px 11px; border-radius: 9px; background: var(--surface-soft); }
-.nested-replies p { font-size: 11px; }
+.nested-replies p { display: flex; align-items: baseline; gap: 2px; margin: 0; font-size: 11px; line-height: 1.55; }
+.nested-replies p > button:first-child { flex: 0 0 auto; color: var(--green); font-weight: 700; }
+.nested-replies p > span { min-width: 0; flex: 1; }
+.nested-replies p > button:last-child { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; color: var(--muted); border-radius: 6px; }
+.nested-replies p > button:last-child:hover { color: var(--green); background: var(--green-soft); }
 .load-more { display: flex; justify-content: center; padding-top: 15px; }
 
 .app-detail-hero { position: relative; display: grid; grid-template-columns: 105px minmax(0, 1fr); gap: 20px; overflow: hidden; padding: 32px clamp(20px, 5vw, 52px); background: radial-gradient(circle at 85% 10%, var(--blue-soft), transparent 45%), var(--surface-soft); }
@@ -489,6 +497,10 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
 .app-detail-stats span { display: grid; gap: 2px; }
 .app-detail-stats strong { font-size: 14px; }
 .app-detail-stats small { color: var(--faint); font-size: 9px; }
+.app-detail-hero .detail-actions { justify-content: flex-start; }
+.detail-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--line); }
+.detail-facts span { display: grid; min-width: 0; gap: 5px; padding: 13px 18px; overflow-wrap: anywhere; color: var(--muted); font-size: 11px; background: var(--surface); }
+.detail-facts b { color: var(--faint); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
 .detail-section { padding: 22px clamp(20px, 5vw, 52px); border-top: 1px solid var(--line); }
 .detail-section h3 { margin: 0 0 10px; font-size: 15px; }
 .detail-section > p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.75; white-space: pre-line; }
@@ -504,6 +516,9 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
 .profile-stats span { display: grid; gap: 2px; }
 .profile-stats strong { font-size: 16px; }
 .profile-stats small { color: var(--faint); font-size: 9px; }
+.detail-tabs { position: sticky; z-index: 2; top: 0; display: flex; gap: 5px; padding: 9px clamp(15px, 4vw, 38px); overflow-x: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(12px); }
+.detail-tabs button { min-width: 64px; padding: 8px 11px; color: var(--muted); font-size: 11px; font-weight: 700; border-radius: 8px; }
+.detail-tabs button:hover, .detail-tabs button.active { color: var(--green); background: var(--green-soft); }
 
 .rule-dialog { width: min(760px, calc(100vw - 34px)); }
 .rule-form { padding: 20px; }
@@ -616,10 +631,17 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
 .compose-media > div { position: relative; overflow: hidden; aspect-ratio: 1; border-radius: 10px; background: var(--surface-3); }
 .compose-media img { width: 100%; height: 100%; object-fit: cover; }
 .compose-media button { position: absolute; top: 5px; right: 5px; display: grid; width: 24px; height: 24px; place-items: center; color: #fff; border-radius: 50%; background: rgb(0 0 0 / 62%); }
+.compose-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.compose-tools > div { display: flex; gap: 6px; }
+.compose-tools button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; color: var(--green); font-size: 11px; font-weight: 700; border-radius: 7px; background: var(--green-soft); }
+.compose-tools small { overflow: hidden; color: var(--faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .compose-upload { display: flex; align-items: center; gap: 7px; margin-top: 11px; padding: 11px 13px; color: var(--green); font-size: 12px; font-weight: 700; border: 1px dashed color-mix(in srgb, var(--green) 45%, var(--line)); border-radius: 10px; cursor: pointer; background: var(--green-soft); }
+.compose-upload.dragging { border-color: var(--green); background: color-mix(in srgb, var(--green) 18%, var(--surface)); box-shadow: 0 0 0 3px var(--green-soft); }
+.compose-upload.has-media span::after { content: "（继续添加）"; color: var(--muted); font-size: 10px; font-weight: 500; }
 .compose-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .compose-upload small { margin-left: auto; color: var(--muted); font-size: 10px; font-weight: 500; }
 .compose-counter { display: flex; justify-content: space-between; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 11px; }
+.compose-counter b.near-limit { color: var(--red); }
 .history-list { display: grid; gap: 10px; }
 .history-list article { padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
 .history-list article small { color: var(--muted); font-size: 10px; }
@@ -710,7 +732,8 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
   .feed-topic { display: none; }
   .feed-images button, .feed-images img { min-height: 105px; }
   .feed-meta button, .feed-meta a { min-width: 62px; }
-  .feed-meta .share-action { display: none; }
+  .feed-meta { overflow-x: auto; scrollbar-width: none; }
+  .feed-meta::-webkit-scrollbar { display: none; }
   .app-grid, .topic-grid { grid-template-columns: 1fr; }
   .metric-grid { grid-template-columns: 1fr 1fr; gap: 9px; }
   .metric-card { min-height: 88px; gap: 10px; padding: 13px; }
@@ -733,11 +756,14 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
   .dialog-body { max-height: calc(100vh - 82px); }
   .detail-feed { padding: 18px 15px; }
   .comments-section { padding: 0 15px 26px; }
+  .detail-subnav { padding-inline: 15px; }
   .detail-feed .feed-images { grid-template-columns: 1fr 1fr; }
   .app-detail-hero { grid-template-columns: 78px minmax(0, 1fr); gap: 14px; padding: 24px 18px; }
   .app-detail-hero img, .app-detail-hero .app-logo-placeholder { width: 78px; height: 78px; border-radius: 18px; }
   .app-detail-hero h2 { margin-top: 2px; font-size: 21px; }
   .app-detail-stats { grid-column: 1 / -1; margin-top: 4px; }
+  .app-detail-hero .detail-actions { grid-column: 1 / -1; flex-wrap: wrap; }
+  .detail-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .profile-stats { gap: 18px; }
   .rule-form { padding: 15px; }
   .mode-choice { grid-template-columns: 1fr; }
@@ -760,6 +786,8 @@ dialog::backdrop { background: rgb(4 16 11 / 55%); backdrop-filter: blur(4px); }
   .collection-detail-hero > img, .collection-detail-hero > span { width: 78px; height: 78px; border-radius: 15px; }
   .collection-detail-hero .detail-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .compose-media { grid-template-columns: repeat(3, 1fr); }
+  .compose-tools { align-items: flex-start; }
+  .compose-tools small { max-width: 44vw; }
   .compose-upload small { display: none; }
   .mobile-tabs {
     position: fixed;

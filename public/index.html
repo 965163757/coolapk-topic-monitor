@@ -122,8 +122,15 @@
       </header>
       <form class="dialog-body compose-form" id="composeForm">
         <textarea id="composeMessage" rows="10" maxlength="10000" placeholder="分享此刻的想法，支持 #话题# 与 @酷友"></textarea>
+        <div class="compose-tools">
+          <div>
+            <button type="button" data-compose-insert="topic"><i class="ph ph-hash"></i>话题</button>
+            <button type="button" data-compose-insert="mention"><i class="ph ph-at"></i>酷友</button>
+          </div>
+          <small id="composeDraftStatus">内容会自动保存为本地草稿</small>
+        </div>
         <div class="compose-media" id="composeMediaPreview"></div>
-        <label class="compose-upload"><input id="composeImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><i class="ph ph-image"></i><span>添加图片</span><small>最多 9 张，单张不超过 10MB</small></label>
+        <label class="compose-upload" id="composeDropZone"><input id="composeImages" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><i class="ph ph-image"></i><span>添加图片</span><small>最多 9 张，单张不超过 10MB；支持拖放或粘贴</small></label>
         <div class="compose-counter"><span id="composeStatus">内容将直接发布到当前连接的酷安账号</span><b><span id="composeCount">0</span>/10000</b></div>
         <footer class="dialog-actions"><button class="btn secondary" type="button" data-close="composeDialog">取消</button><button class="btn primary" id="submitCompose" type="submit"><i class="ph ph-paper-plane-tilt"></i>发布</button></footer>
       </form>
@@ -158,7 +165,7 @@
     </dialog>
 
     <dialog class="lightbox" id="lightbox">
-      <header><span id="lightboxCaption">查看图片</span><div><button id="zoomOut" type="button"><i class="ph ph-minus"></i></button><button id="zoomReset" type="button">100%</button><button id="zoomIn" type="button"><i class="ph ph-plus"></i></button><button type="button" data-close="lightbox"><i class="ph ph-x"></i></button></div></header>
+      <header><span id="lightboxCaption">查看图片</span><div><button id="zoomOut" type="button" aria-label="缩小图片"><i class="ph ph-minus"></i></button><button id="zoomReset" type="button" aria-label="重置图片缩放">100%</button><button id="zoomIn" type="button" aria-label="放大图片"><i class="ph ph-plus"></i></button><button type="button" data-close="lightbox" aria-label="关闭图片"><i class="ph ph-x"></i></button></div></header>
       <div class="lightbox-stage" id="lightboxStage"><img id="lightboxImage" alt="放大的帖子图片" /></div>
     </dialog>
 

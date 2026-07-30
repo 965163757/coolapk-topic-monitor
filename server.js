@@ -9,7 +9,7 @@ import { canonicalSource, isSupportedSource, parseSourceKey } from "./lib/monito
 import { AI_API_MODES, aiEndpoint, aiHeaders, dataUrlParts, extractAiText, inferAiProvider, isCompatibilityFailure, isUnsupportedImageInputError, normalizeAiApiMode, normalizeAiProvider, parseAiJson, preferredAiApiModes, requestBodyVariants, shouldTryAlternateAiApi } from "./lib/ai-compat.js";
 import { appendArchiveEvent, archiveFeed, archiveFeedDetail, archiveSummary, archiveUser, archivedFeedDetail, archivedFeedsForUser, cleanupArchive, createArchive, evaluationSummary, latestEvaluations, normalizeRetention, pendingContinuationStart, queryArchiveFeeds, resolveEvaluation } from "./lib/store.js";
 import { aiRuleInstructions, chunkItems, matchFeedKeywords, normalizeKeywords, normalizeRuleMode, requiresNotification } from "./lib/rules.js";
-import { appSummary, collectEntities, collectionSummary, messageSummary, notificationSummary, pageDecorations, sessionCookieHeader, uniqueSummaries, webChannelConfig, webChannels } from "./lib/web-client.js";
+import { appSummary, collectEntities, collectionSummary, messageSummary, notificationSummary, pageDecorations, relationshipUserSource, sessionCookieHeader, uniqueSummaries, webChannelConfig, webChannels } from "./lib/web-client.js";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, "public");
@@ -167,6 +167,25 @@ async function coolapkRequest(path, { method = "GET", params = {}, fields = null
 
 async function coolapkGet(path, params = {}, options = {}) {
   return coolapkRequest(path, { method: "GET", params, ...options });
+}
+
+async function coolapkGetOptionalSession(path, params = {}) {
+  try {
+    return await coolapkGet(path, params);
+  } catch (error) {
+    const anonymousEmpty = /什么都没找到|没有找到|暂无|没有更多|无更多/i.test(error.message);
+    if (!accountConfigured() || (error.statusCode !== 401 && !anonymousEmpty)) throw error;
+    return coolapkGet(path, params, { authenticated: true });
+  }
+}
+
+async function coolapkGetOptionalList(path, params = {}) {
+  try {
+    return await coolapkGetOptionalSession(path, params);
+  } catch (error) {
+    if (/什么都没找到|没有找到|暂无|没有更多|无更多/i.test(error.message)) return { data: [] };
+    throw error;
+  }
 }
 
 async function coolapkPost(path, params = {}, fields = null) {
@@ -854,14 +873,14 @@ async function fetchUserFeeds(uid, branch = "feed", page = 1) {
   const allowed = new Set(["feed", "htmlFeed", "questionAndAnswer"]);
   if (!/^\d{1,20}$/.test(cleanUid)) throw Object.assign(new Error("用户 UID 无效"), { statusCode: 400 });
   if (!allowed.has(branch)) throw Object.assign(new Error("不支持的用户内容分类"), { statusCode: 400 });
-  const payload = await coolapkGet(`/user/${branch}List`, { uid: cleanUid, page, isIncludeTop: 1 }, { authenticated: true });
+  const payload = await coolapkGetOptionalList(`/user/${branch}List`, { uid: cleanUid, page, isIncludeTop: 1 });
   return { uid: cleanUid, branch, page, feeds: feedItems(payload.data).map(feedSummary) };
 }
 
 async function fetchCollections(uid, page = 1) {
   const cleanUid = String(uid || "").trim();
   if (!/^\d{1,20}$/.test(cleanUid)) throw Object.assign(new Error("用户 UID 无效"), { statusCode: 400 });
-  const payload = await coolapkGet("/collection/list", { uid: cleanUid, page }, { authenticated: true });
+  const payload = await coolapkGetOptionalList("/collection/list", { uid: cleanUid, page });
   const rows = collectEntities(payload.data, (item) => item?.entityType === "collection" || (item?.id && (item?.item_num != null || item?.cover_pic)));
   return { uid: cleanUid, page, collections: uniqueSummaries(rows.map(collectionSummary)) };
 }
@@ -870,8 +889,8 @@ async function fetchCollectionDetail(id, page = 1) {
   const cleanId = String(id || "").trim();
   if (!/^\d{1,20}$/.test(cleanId)) throw Object.assign(new Error("收藏单 ID 无效"), { statusCode: 400 });
   const [detailPayload, itemsPayload] = await Promise.all([
-    coolapkGet("/collection/detail", { id: cleanId }, { authenticated: true }),
-    coolapkGet("/collection/itemList", { id: cleanId, page }, { authenticated: true }),
+    coolapkGetOptionalSession("/collection/detail", { id: cleanId }),
+    coolapkGetOptionalList("/collection/itemList", { id: cleanId, page }),
   ]);
   const raw = itemsPayload.data || [];
   return {
@@ -885,9 +904,9 @@ async function fetchCollectionDetail(id, page = 1) {
 async function fetchUserList(uid, type = "followList", page = 1) {
   const allowed = new Set(["followList", "fansList"]);
   if (!allowed.has(type)) throw Object.assign(new Error("不支持的用户关系分类"), { statusCode: 400 });
-  const payload = await coolapkGet(`/user/${type}`, { uid, page, isIncludeTop: 1 }, { authenticated: true });
+  const payload = await coolapkGetOptionalList(`/user/${type}`, { uid, page, isIncludeTop: 1 });
   const users = collectEntities(payload.data, (item) => item?.entityType === "user" || item?.uid || item?.userInfo?.uid)
-    .map((item) => publicUserSummary(item.userInfo || item))
+    .map((item) => publicUserSummary(relationshipUserSource(item)))
     .filter((item) => item.uid);
   return { uid: String(uid), type, page, users: uniqueSummaries(users, "uid") };
 }
@@ -2204,7 +2223,7 @@ async function handleApi(request, response, url) {
       forwards: ["/feed/forwardList", { id, type: "feed", page }],
       history: ["/feed/changeHistoryList", { id }],
     }[type];
-    const payload = await coolapkGet(config[0], config[1], { authenticated: true });
+    const payload = await coolapkGetOptionalList(config[0], config[1]);
     const rows = Array.isArray(payload.data) ? payload.data : [];
     return sendJson(response, 200, {
       id,

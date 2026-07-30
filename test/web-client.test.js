@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appSummary, collectEntities, collectionSummary, messageSummary, notificationSummary, pageDecorations, sessionCookieHeader, webChannelConfig, webChannels } from "../lib/web-client.js";
+import { appSummary, collectEntities, collectionSummary, messageSummary, notificationSummary, pageDecorations, relationshipUserSource, sessionCookieHeader, webChannelConfig, webChannels } from "../lib/web-client.js";
 
 test("exposes only supported web channels", () => {
   assert.ok(webChannels().some((item) => item.key === "home"));
@@ -13,6 +13,19 @@ test("collects nested entities and normalizes apps", () => {
   const apps = collectEntities(data, (item) => item.entityType === "apk").map(appSummary);
   assert.deepEqual(apps.map((item) => item.id), ["5189"]);
   assert.equal(apps[0].score, 6.9);
+});
+
+test("selects the related user from Coolapk relationship rows", () => {
+  const row = {
+    uid: 3941065,
+    username: "当前用户",
+    fuid: 704548,
+    fusername: "关注的用户",
+    fUserAvatar: "https://avatar.coolapk.com/target.jpg",
+    fUserInfo: { uid: 704548, username: "关注的用户", level: 11 },
+  };
+  assert.deepEqual(relationshipUserSource(row), row.fUserInfo);
+  assert.equal(relationshipUserSource({ fuid: 2, fusername: "目标" }).uid, 2);
 });
 
 test("extracts banners and shortcuts from page cards", () => {

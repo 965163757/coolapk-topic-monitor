@@ -159,12 +159,26 @@ function toast(message, type = "") {
 
 function showDialog(dialog) {
   if (!dialog || dialog.open) return;
+  dialog._returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   try { dialog.showModal(); } catch { dialog.setAttribute("open", ""); }
 }
 
 function closeDialog(dialog) {
   if (!dialog?.open) return;
   try { dialog.close(); } catch { dialog.removeAttribute("open"); }
+  const returnFocus = dialog._returnFocus;
+  dialog._returnFocus = null;
+  if (returnFocus?.isConnected) setTimeout(() => returnFocus.focus({ preventScroll: true }), 0);
+}
+
+function closeAllDialogs() {
+  $$("dialog[open]").forEach((dialog) => closeDialog(dialog));
+}
+
+function routeToAccount(message = "连接酷安账号后即可继续") {
+  closeAllDialogs();
+  location.hash = "#/account";
+  toast(message);
 }
 
 function pageLoading(title = "正在加载内容") {
@@ -194,7 +208,7 @@ function feedImageMarkup(feed) {
   const className = visible.length === 1 ? "one" : visible.length === 2 ? "two" : "three";
   return `<div class="feed-images ${className}">${visible.map((picture, index) => {
     const more = index === 2 && pictures.length > 3 ? `+${pictures.length - 3}` : "";
-    return `<button class="${more ? "more" : ""}" type="button" data-image="${escapeHtml(picture)}" data-caption="${escapeHtml(displayFeedTitle(feed))}" ${more ? `data-more="${more}"` : ""}><img src="${escapeHtml(imageUrl(picture))}" alt="帖子图片 ${index + 1}" loading="lazy" /></button>`;
+    return `<button class="${more ? "more" : ""}" type="button" data-image="${escapeHtml(picture)}" data-caption="${escapeHtml(displayFeedTitle(feed))}" aria-label="放大帖子图片 ${index + 1}${more ? `，另有 ${pictures.length - 3} 张` : ""}" ${more ? `data-more="${more}"` : ""}><img src="${escapeHtml(imageUrl(picture))}" alt="帖子图片 ${index + 1}" loading="lazy" /></button>`;
   }).join("")}</div>`;
 }
 
@@ -222,9 +236,9 @@ function feedCard(feed, options = {}) {
         ${feedImageMarkup(feed)}
       </div>
       <footer class="feed-meta">
-        <button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i>${compactNumber(feed.likes)}</button>
-        <button type="button" data-feed="${escapeHtml(feed.id)}"><i class="ph ph-chat-circle"></i>${compactNumber(feed.comments)}</button>
-        <a class="share-action" href="${escapeHtml(feed.url || `https://www.coolapk.com/feed/${feed.id}`)}" target="_blank" rel="noreferrer"><i class="ph ph-share-network"></i>${compactNumber(feed.shares)}</a>
+        <button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}" aria-label="${feed.liked ? "取消点赞" : "点赞"}，当前 ${compactNumber(feed.likes)} 个赞"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i><span data-interaction-count data-count="${Number(feed.likes || 0)}">${compactNumber(feed.likes)}</span></button>
+        <button type="button" data-feed="${escapeHtml(feed.id)}" aria-label="查看 ${compactNumber(feed.comments)} 条评论"><i class="ph ph-chat-circle"></i>${compactNumber(feed.comments)}</button>
+        <button class="share-action" type="button" data-share-feed="${escapeHtml(feed.id)}" data-share-url="${escapeHtml(feed.url || `https://www.coolapk.com/feed/${feed.id}`)}" data-share-title="${escapeHtml(title)}" aria-label="分享动态"><i class="ph ph-share-network"></i>${compactNumber(feed.shares)}</button>
         ${scoreMarkup}
         <button class="open-feed" type="button" data-feed="${escapeHtml(feed.id)}">查看详情<i class="ph ph-caret-right"></i></button>
       </footer>
@@ -251,10 +265,11 @@ function appGrid(apps) {
 function topicCard(topic, { showMonitor = true } = {}) {
   const monitored = state.topics.some((item) => item.sourceKey === topic.sourceKey || item.tag === topic.tag);
   const logo = topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : `<i class="ph ph-hash"></i>`;
+  const title = topic.title || topic.tag;
   return `<article class="topic-card">
-    <button class="topic-card-cover" type="button" data-public-topic="${escapeHtml(topic.tag || topic.title)}">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : ""}</button>
-    <div class="topic-card-body"><span class="topic-card-logo">${logo}</span><h3>${escapeHtml(topic.title || topic.tag)}</h3><p>${escapeHtml(stripHtml(topic.description || topic.intro || "查看话题中的最新公开动态"))}</p>
-      <footer><span>${compactNumber(topic.followers)} 关注</span><span>${compactNumber(topic.posts)} 动态</span>${showMonitor ? `<button type="button" data-monitor-add="${escapeHtml(topic.sourceKey || topic.tag)}" ${monitored ? "disabled" : ""}>${monitored ? "已监控" : "加入监控"}</button>` : ""}</footer>
+    <button class="topic-card-cover" type="button" data-public-topic="${escapeHtml(topic.tag || title)}" aria-label="查看话题：${escapeHtml(title)}">${topic.logo ? `<img src="${escapeHtml(imageUrl(topic.logo))}" alt="" loading="lazy" />` : ""}</button>
+    <div class="topic-card-body"><span class="topic-card-logo">${logo}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(stripHtml(topic.description || topic.intro || "查看话题中的最新公开动态"))}</p>
+      <footer><span>${compactNumber(topic.followers)} 关注</span><span>${compactNumber(topic.posts)} 动态</span>${showMonitor ? `<button type="button" data-monitor-add="${escapeHtml(topic.sourceKey || topic.tag)}" aria-label="${monitored ? "已监控" : "加入监控"}：${escapeHtml(title)}" ${monitored ? "disabled" : ""}>${monitored ? "已监控" : "加入监控"}</button>` : ""}</footer>
     </div>
   </article>`;
 }
@@ -272,7 +287,7 @@ function renderHero(banners = []) {
   if (!banners.length) {
     return `<section class="hero-carousel"><div class="hero-fallback"><span>COOLAPK WEB</span><h2>在浏览器里，打开完整的酷安内容工作台</h2><p>首页、动态、应用、话题、详情评论与 AI 监控，现在统一在一个响应式界面中。</p></div></section>`;
   }
-  return `<section class="hero-carousel" id="heroCarousel">${banners.map((banner, index) => `<button class="hero-slide ${index === 0 ? "active" : ""}" type="button" data-smart-link="${escapeHtml(banner.url)}"><img src="${escapeHtml(imageUrl(banner.picture))}" alt="" /><span class="hero-caption"><small>今日精选</small><h2>${escapeHtml(banner.title)}</h2><p>${escapeHtml(banner.subtitle || "来自酷安社区的热门内容")}</p></span></button>`).join("")}<div class="hero-dots">${banners.map((_, index) => `<button class="${index === 0 ? "active" : ""}" type="button" data-hero-index="${index}"></button>`).join("")}</div></section>`;
+  return `<section class="hero-carousel" id="heroCarousel">${banners.map((banner, index) => `<button class="hero-slide ${index === 0 ? "active" : ""}" type="button" data-smart-link="${escapeHtml(banner.url)}" aria-label="打开精选内容：${escapeHtml(banner.title)}"><img src="${escapeHtml(imageUrl(banner.picture))}" alt="" /><span class="hero-caption"><small>今日精选</small><h2>${escapeHtml(banner.title)}</h2><p>${escapeHtml(banner.subtitle || "来自酷安社区的热门内容")}</p></span></button>`).join("")}<div class="hero-dots">${banners.map((_, index) => `<button class="${index === 0 ? "active" : ""}" type="button" data-hero-index="${index}" aria-label="切换到第 ${index + 1} 张精选内容"></button>`).join("")}</div></section>`;
 }
 
 function renderShortcuts(shortcuts = []) {
@@ -335,6 +350,7 @@ function parseRoute() {
 }
 
 async function route({ force = false } = {}) {
+  closeAllDialogs();
   const parsed = parseRoute();
   state.route = parsed.route;
   state.routeParams = parsed.params;
@@ -521,7 +537,13 @@ async function fetchMonitorData() {
 
 async function renderMonitor({ sequence }) {
   const requestedTopic = state.routeParams.get("topic");
-  if (requestedTopic && (requestedTopic === "__all__" || state.topics.some((item) => item.tag === requestedTopic))) state.monitor.topic = requestedTopic;
+  if (requestedTopic) {
+    state.monitor.topic = requestedTopic === "__all__" || state.topics.some((item) => item.tag === requestedTopic)
+      ? requestedTopic
+      : "__all__";
+  } else if (state.monitor.topic !== "__all__" && !state.topics.some((item) => item.tag === state.monitor.topic)) {
+    state.monitor.topic = "__all__";
+  }
   const [payload, evaluationsPayload] = await Promise.all([
     fetchMonitorData(),
     api("/api/evaluations?status=all&page=1&pageSize=10").catch(() => ({ stats: state.evaluationStats })),
@@ -570,7 +592,7 @@ function monitorPagination() {
   const page = Number(meta.page || state.monitor.page || 1);
   const totalPages = Number(meta.totalPages || 1);
   const total = Number(meta.total || 0);
-  return `<footer class="pagination"><small>共 ${fullNumberFormat.format(total)} 条 · 第 ${page}/${totalPages} 页</small><div><button type="button" data-monitor-page="${page - 1}" ${page <= 1 ? "disabled" : ""}><i class="ph ph-caret-left"></i></button><button type="button" data-monitor-page="${page + 1}" ${page >= totalPages ? "disabled" : ""}><i class="ph ph-caret-right"></i></button></div></footer>`;
+  return `<footer class="pagination"><small>共 ${fullNumberFormat.format(total)} 条 · 第 ${page}/${totalPages} 页</small><div><button type="button" data-monitor-page="${page - 1}" aria-label="上一页" ${page <= 1 ? "disabled" : ""}><i class="ph ph-caret-left"></i></button><button type="button" data-monitor-page="${page + 1}" aria-label="下一页" ${page >= totalPages ? "disabled" : ""}><i class="ph ph-caret-right"></i></button></div></footer>`;
 }
 
 async function reloadMonitorRegion() {
@@ -602,7 +624,7 @@ async function renderAi({ sequence }) {
     <section class="surface"><header class="surface-head"><div><h2>内容判断流水</h2><p>每个话题独立展示规则、匹配度和通知状态</p></div><div class="filter-tabs"><button class="${state.ai.status === "matched" ? "active" : ""}" type="button" data-ai-status="matched">仅命中</button><button class="${state.ai.status === "all" ? "active" : ""}" type="button" data-ai-status="all">全部</button></div></header>
       <div class="monitor-toolbar"><select id="aiTopicFilter"><option value="">全部话题</option>${state.topics.map((topic) => `<option value="${escapeHtml(topic.tag)}" ${state.ai.topic === topic.tag ? "selected" : ""}>${escapeHtml(topic.detail?.title || topic.tag)}</option>`).join("")}</select></div>
       <div class="ai-history-list">${aiRows(state.evaluations)}</div>
-      <footer class="pagination"><small>第 ${state.ai.page}/${state.ai.totalPages} 页</small><div><button type="button" data-ai-page="${state.ai.page - 1}" ${state.ai.page <= 1 ? "disabled" : ""}><i class="ph ph-caret-left"></i></button><button type="button" data-ai-page="${state.ai.page + 1}" ${state.ai.page >= state.ai.totalPages ? "disabled" : ""}><i class="ph ph-caret-right"></i></button></div></footer>
+      <footer class="pagination"><small>第 ${state.ai.page}/${state.ai.totalPages} 页</small><div><button type="button" data-ai-page="${state.ai.page - 1}" aria-label="上一页" ${state.ai.page <= 1 ? "disabled" : ""}><i class="ph ph-caret-left"></i></button><button type="button" data-ai-page="${state.ai.page + 1}" aria-label="下一页" ${state.ai.page >= state.ai.totalPages ? "disabled" : ""}><i class="ph ph-caret-right"></i></button></div></footer>
     </section>
   </section>`;
   updateChrome();
@@ -651,7 +673,6 @@ async function renderNotifications({ sequence }) {
     viewHost.innerHTML = `<section class="page">${pageHead("INBOX", "通知与私信", "集中查看回复、@、点赞、关注和私信会话。")}${accountRequiredCard("查看账号通知")}</section>`;
     return;
   }
-  const tab = state.routeParams.get("tab") || "list";
   const categories = [
     ["list", "回复我的", "chat-circle"],
     ["atMeList", "@我的动态", "at"],
@@ -660,6 +681,8 @@ async function renderNotifications({ sequence }) {
     ["contactsFollowList", "新增关注", "user-plus"],
     ["messages", "私信", "envelope-simple"],
   ];
+  const requestedTab = state.routeParams.get("tab") || "list";
+  const tab = categories.some(([key]) => key === requestedTab) ? requestedTab : "list";
   const payload = tab === "messages"
     ? await api("/api/messages?page=1")
     : await api(`/api/notifications?type=${encodeURIComponent(tab)}&page=1`);
@@ -721,7 +744,9 @@ async function renderAccount({ sequence }) {
     return;
   }
 
-  const tab = state.routeParams.get("tab") || "feeds";
+  const tabs = [["feeds", "动态"], ["articles", "文章"], ["questions", "问答"], ["collections", "收藏"], ["following", "关注"], ["fans", "粉丝"], ["history", "历史"], ["recent", "常去"]];
+  const requestedTab = state.routeParams.get("tab") || "feeds";
+  const tab = tabs.some(([key]) => key === requestedTab) ? requestedTab : "feeds";
   const contentRequest = tab === "feeds" ? api(`/api/users/${account.uid}/feeds?branch=feed&page=1`)
     : tab === "articles" ? api(`/api/users/${account.uid}/feeds?branch=htmlFeed&page=1`)
       : tab === "questions" ? api(`/api/users/${account.uid}/feeds?branch=questionAndAnswer&page=1`)
@@ -735,7 +760,6 @@ async function renderAccount({ sequence }) {
   ]);
   if (sequence !== state.requestSequence) return;
   const profile = profilePayload.profile || {};
-  const tabs = [["feeds", "动态"], ["articles", "文章"], ["questions", "问答"], ["collections", "收藏"], ["following", "关注"], ["fans", "粉丝"], ["history", "历史"], ["recent", "常去"]];
   viewHost.innerHTML = `<section class="page account-page">
     ${pageHead("MY COOLAPK", "账号中心", "完整管理个人内容、社区关系、收藏与浏览记录。", `<button class="btn primary" type="button" data-compose="feed"><i class="ph ph-pencil-simple-line"></i>发布动态</button>`)}
     <section class="surface account-profile">
@@ -864,13 +888,15 @@ async function openFeed(id) {
 }
 
 function commentMarkup(reply) {
-  return `<article class="comment" data-reply-card="${escapeHtml(reply.id)}">${avatarMarkup(reply.avatar, reply.username, "avatar")}<div class="comment-main"><header class="comment-head"><button type="button" data-user="${escapeHtml(reply.userId || "")}">${escapeHtml(reply.username || "酷友")}</button>${reply.isAuthor ? `<span class="author-label">作者</span>` : ""}<small>${relativeTime(reply.createdAt)}</small></header><p>${reply.replyTo ? `<span style="color:var(--green)">@${escapeHtml(reply.replyTo)}</span> ` : ""}${escapeHtml(stripHtml(reply.message || ""))}</p>${reply.picture ? `<button type="button" data-image="${escapeHtml(reply.picture)}"><img src="${escapeHtml(imageUrl(reply.picture))}" alt="评论图片" style="max-height:180px;border-radius:9px" /></button>` : ""}<footer><button class="${reply.liked ? "active" : ""}" type="button" data-reply-like="${escapeHtml(reply.id)}" data-liked="${reply.liked ? "1" : "0"}"><i class="ph${reply.liked ? "-fill" : ""} ph-thumbs-up"></i> ${compactNumber(reply.likes)}</button><button type="button" data-compose="reply" data-compose-id="${escapeHtml(reply.id)}" data-compose-title="回复 ${escapeHtml(reply.username || "酷友")}"><i class="ph ph-chat-circle"></i> 回复</button></footer>${reply.replies?.length ? `<div class="nested-replies">${reply.replies.slice(0, 5).map((child) => `<p><b>${escapeHtml(child.username)}：</b>${escapeHtml(stripHtml(child.message))}</p>`).join("")}</div>` : ""}</div></article>`;
+  return `<article class="comment" data-reply-card="${escapeHtml(reply.id)}">${avatarMarkup(reply.avatar, reply.username, "avatar")}<div class="comment-main"><header class="comment-head"><button type="button" data-user="${escapeHtml(reply.userId || "")}">${escapeHtml(reply.username || "酷友")}</button>${reply.isAuthor ? `<span class="author-label">作者</span>` : ""}<small>${relativeTime(reply.createdAt)}</small></header><p>${reply.replyTo ? `<span style="color:var(--green)">@${escapeHtml(reply.replyTo)}</span> ` : ""}${escapeHtml(stripHtml(reply.message || ""))}</p>${reply.picture ? `<button type="button" data-image="${escapeHtml(reply.picture)}" aria-label="放大评论图片"><img src="${escapeHtml(imageUrl(reply.picture))}" alt="评论图片" style="max-height:180px;border-radius:9px" /></button>` : ""}<footer><button class="${reply.liked ? "active" : ""}" type="button" data-reply-like="${escapeHtml(reply.id)}" data-liked="${reply.liked ? "1" : "0"}" aria-label="${reply.liked ? "取消点赞评论" : "点赞评论"}，当前 ${compactNumber(reply.likes)} 个赞"><i class="ph${reply.liked ? "-fill" : ""} ph-thumbs-up"></i> <span data-interaction-count data-count="${Number(reply.likes || 0)}">${compactNumber(reply.likes)}</span></button><button type="button" data-compose="reply" data-compose-id="${escapeHtml(reply.id)}" data-compose-title="回复 ${escapeHtml(reply.username || "酷友")}"><i class="ph ph-chat-circle"></i> 回复</button></footer>${reply.replies?.length ? `<div class="nested-replies">${reply.replies.slice(0, 5).map((child) => `<p><button type="button" data-user="${escapeHtml(child.userId || "")}">${escapeHtml(child.username || "酷友")}</button><span>：${escapeHtml(stripHtml(child.message))}</span><button type="button" data-compose="reply" data-compose-id="${escapeHtml(child.id)}" data-compose-title="回复 ${escapeHtml(child.username || "酷友")}" aria-label="回复 ${escapeHtml(child.username || "酷友")}"><i class="ph ph-arrow-bend-up-left"></i></button></p>`).join("")}</div>` : ""}</div></article>`;
 }
 
 function renderFeedDetail(payload) {
   const feed = payload.feed;
+  const title = displayFeedTitle(feed);
+  const webUrl = feed.url || `https://www.coolapk.com/feed/${feed.id}`;
   $("#feedDialogSubtitle").textContent = feed.topic || `${feed.comments || payload.replies?.length || 0} 条评论`;
-  feedDialogBody.innerHTML = `<article class="detail-feed"><header class="feed-author">${avatarMarkup(feed.avatar, feed.username)}<div class="feed-author-info"><button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username)}</button><small>${formatDate(feed.createdAt)}${feed.device ? ` · ${escapeHtml(feed.device)}` : ""}</small></div>${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(feed.topic)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}</header><h2 class="feed-title">${escapeHtml(displayFeedTitle(feed))}</h2><p class="feed-text">${escapeHtml(stripHtml(feed.message || ""))}</p>${feedImageMarkup(feed)}<footer class="feed-meta" style="margin:18px -13px -24px"><button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i>${compactNumber(feed.likes)}</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="likes"><i class="ph ph-users"></i>点赞用户</button><button type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态"><i class="ph ph-chat-circle"></i>${compactNumber(feed.replyCount || feed.comments)}</button><a href="${escapeHtml(feed.url)}" target="_blank" rel="noreferrer" class="open-feed">酷安 App / 网页<i class="ph ph-arrow-square-out"></i></a></footer></article><section class="comments-section"><header class="comments-head"><h3>全部评论</h3><span>第 <b id="replyPageNumber">1</b> 页</span></header>${state.account?.configured ? `<button class="quick-reply" type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态"><i class="ph ph-pencil-simple-line"></i>写下你的回复</button>` : ""}<div class="comment-list" id="commentList">${payload.replies?.length ? payload.replies.map(commentMarkup).join("") : emptyState("chat-circle", "还没有评论", "该动态暂时没有返回公开评论。")}</div><div class="load-more"><button class="btn secondary" id="loadMoreReplies" type="button" data-load-replies ${payload.replies?.length ? "" : "disabled"}><i class="ph ph-chat-circle-dots"></i>加载更多评论</button></div></section>`;
+  feedDialogBody.innerHTML = `<article class="detail-feed"><header class="feed-author">${avatarMarkup(feed.avatar, feed.username)}<div class="feed-author-info"><button type="button" data-user="${escapeHtml(feed.userId || "")}">${escapeHtml(feed.username)}</button><small>${formatDate(feed.createdAt)}${feed.device ? ` · ${escapeHtml(feed.device)}` : ""}</small></div>${feed.topic ? `<button class="feed-topic" type="button" data-public-topic="${escapeHtml(feed.topic)}"><i class="ph ph-hash"></i>${escapeHtml(feed.topic)}</button>` : ""}</header><h2 class="feed-title">${escapeHtml(title)}</h2><p class="feed-text">${escapeHtml(stripHtml(feed.message || ""))}</p>${feedImageMarkup(feed)}<footer class="feed-meta detail-feed-actions" style="margin:18px -13px -24px"><button class="${feed.liked ? "active" : ""}" type="button" data-feed-like="${escapeHtml(feed.id)}" data-liked="${feed.liked ? "1" : "0"}" aria-label="${feed.liked ? "取消点赞" : "点赞"}，当前 ${compactNumber(feed.likes)} 个赞"><i class="ph${feed.liked ? "-fill" : ""} ph-thumbs-up"></i><span data-interaction-count data-count="${Number(feed.likes || 0)}">${compactNumber(feed.likes)}</span></button><button type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态" aria-label="回复动态，当前 ${compactNumber(feed.replyCount || feed.comments)} 条评论"><i class="ph ph-chat-circle"></i>${compactNumber(feed.replyCount || feed.comments)}</button><button type="button" data-share-feed="${escapeHtml(feed.id)}" data-share-url="${escapeHtml(webUrl)}" data-share-title="${escapeHtml(title)}"><i class="ph ph-share-network"></i>分享</button><a href="coolmarket://feed/${escapeHtml(feed.id)}" class="open-feed" aria-label="在酷安 App 打开"><i class="ph ph-device-mobile"></i>App</a></footer></article><nav class="detail-subnav" aria-label="动态相关信息"><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="likes"><i class="ph ph-users"></i>点赞用户</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="forwards"><i class="ph ph-share-fat"></i>转发记录</button><button type="button" data-feed-aux="${escapeHtml(feed.id)}" data-aux-type="history"><i class="ph ph-clock-counter-clockwise"></i>编辑历史</button><a href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></nav><section class="comments-section"><header class="comments-head"><h3>全部评论</h3><span>第 <b id="replyPageNumber">1</b> 页</span></header>${state.account?.configured ? `<button class="quick-reply" type="button" data-compose="feed-reply" data-compose-id="${escapeHtml(feed.id)}" data-compose-title="回复动态"><i class="ph ph-pencil-simple-line"></i>写下你的回复</button>` : ""}<div class="comment-list" id="commentList">${payload.replies?.length ? payload.replies.map(commentMarkup).join("") : emptyState("chat-circle", "还没有评论", "该动态暂时没有返回公开评论。")}</div><div class="load-more"><button class="btn secondary" id="loadMoreReplies" type="button" data-load-replies ${payload.replies?.length ? "" : "disabled"}><i class="ph ph-chat-circle-dots"></i>加载更多评论</button></div></section>`;
 }
 
 async function loadMoreReplies() {
@@ -882,11 +908,13 @@ async function loadMoreReplies() {
     const page = state.feedReplyPage + 1;
     const payload = await api(`/api/feeds/${state.activeFeedId}/replies?page=${page}`);
     if (payload.replies?.length) {
-      $("#commentList").insertAdjacentHTML("beforeend", payload.replies.map(commentMarkup).join(""));
+      const existing = new Set($$("[data-reply-card]", $("#commentList")).map((item) => item.dataset.replyCard));
+      const freshReplies = payload.replies.filter((reply) => !existing.has(String(reply.id)));
+      if (freshReplies.length) $("#commentList").insertAdjacentHTML("beforeend", freshReplies.map(commentMarkup).join(""));
       state.feedReplyPage = page;
       $("#replyPageNumber").textContent = page;
       button.disabled = false;
-      button.innerHTML = `<i class="ph ph-chat-circle-dots"></i>加载更多评论`;
+      button.innerHTML = `<i class="ph ph-chat-circle-dots"></i>${freshReplies.length ? "加载更多评论" : "继续加载下一页"}`;
     } else {
       button.textContent = "没有更多评论";
     }
@@ -904,7 +932,9 @@ async function openApp(id) {
   try {
     const payload = await api(`/api/apps/${encodeURIComponent(id)}`);
     const app = payload.app;
-    appDialogBody.innerHTML = `<section class="app-detail-hero">${app.logo ? `<img src="${escapeHtml(imageUrl(app.logo))}" alt="${escapeHtml(app.title)}" />` : `<span class="app-logo-placeholder"><i class="ph ph-app-window"></i></span>`}<div><h2>${escapeHtml(app.title)}</h2><p>${escapeHtml(app.subtitle || app.packageName)}</p><div class="app-detail-stats"><span><strong>${Number(app.score || 0).toFixed(1)}</strong><small>酷友评分</small></span><span><strong>${escapeHtml(app.version || "—")}</strong><small>最新版本</small></span><span><strong>${escapeHtml(app.size || "—")}</strong><small>安装包</small></span><span><strong>${compactNumber(app.downloads)}</strong><small>下载</small></span></div></div></section>${app.description ? `<section class="detail-section"><h3>应用介绍</h3><p>${escapeHtml(stripHtml(app.description))}</p></section>` : ""}${app.changelog ? `<section class="detail-section"><h3>更新说明</h3><p>${escapeHtml(stripHtml(app.changelog))}</p></section>` : ""}${app.screenshots?.length ? `<section class="detail-section"><h3>应用截图</h3><div class="screenshots">${app.screenshots.map((picture) => `<button type="button" data-image="${escapeHtml(picture)}" data-caption="${escapeHtml(app.title)}"><img src="${escapeHtml(imageUrl(picture))}" alt="应用截图" loading="lazy" /></button>`).join("")}</div></section>` : ""}<section class="detail-section"><h3>相关动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
+    const webUrl = `https://www.coolapk.com/apk/${encodeURIComponent(app.packageName || app.id)}`;
+    const appUrl = `coolmarket://apk/${encodeURIComponent(app.packageName || app.id)}`;
+    appDialogBody.innerHTML = `<section class="app-detail-hero">${app.logo ? `<img src="${escapeHtml(imageUrl(app.logo))}" alt="${escapeHtml(app.title)}" />` : `<span class="app-logo-placeholder"><i class="ph ph-app-window"></i></span>`}<div><h2>${escapeHtml(app.title)}</h2><p>${escapeHtml(app.subtitle || app.packageName)}</p><div class="app-detail-stats"><span><strong>${Number(app.score || 0).toFixed(1)}</strong><small>酷友评分</small></span><span><strong>${escapeHtml(app.version || "—")}</strong><small>最新版本</small></span><span><strong>${escapeHtml(app.size || "—")}</strong><small>安装包</small></span><span><strong>${compactNumber(app.downloads)}</strong><small>下载</small></span></div><div class="detail-actions"><a class="btn primary" href="${escapeHtml(appUrl)}"><i class="ph ph-device-mobile"></i>酷安 App 打开</a><a class="btn secondary" href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></div></div></section>${app.packageName ? `<section class="detail-facts"><span><b>包名</b>${escapeHtml(app.packageName)}</span><span><b>开发者</b>${escapeHtml(app.developer || "—")}</span><span><b>分类</b>${escapeHtml(app.category || "—")}</span><span><b>更新时间</b>${escapeHtml(app.updatedAt ? formatDate(app.updatedAt) : "—")}</span></section>` : ""}${app.description ? `<section class="detail-section"><h3>应用介绍</h3><p>${escapeHtml(stripHtml(app.description))}</p></section>` : ""}${app.changelog ? `<section class="detail-section"><h3>更新说明</h3><p>${escapeHtml(stripHtml(app.changelog))}</p></section>` : ""}${app.screenshots?.length ? `<section class="detail-section"><h3>应用截图</h3><div class="screenshots">${app.screenshots.map((picture, index) => `<button type="button" data-image="${escapeHtml(picture)}" data-caption="${escapeHtml(app.title)}" aria-label="放大应用截图 ${index + 1}"><img src="${escapeHtml(imageUrl(picture))}" alt="应用截图 ${index + 1}" loading="lazy" /></button>`).join("")}</div></section>` : ""}<section class="detail-section"><h3>相关动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
   } catch (error) {
     appDialogBody.innerHTML = emptyState("warning-circle", "应用详情加载失败", error.message);
   }
@@ -932,17 +962,47 @@ async function openUser(uid) {
   userDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取用户公开主页…</span></div>`;
   showDialog(userDialog);
   try {
-    const [payload, remoteFeeds, collectionPayload] = await Promise.all([
+    const [payload, remoteFeeds] = await Promise.all([
       api(`/api/users/${encodeURIComponent(uid)}`),
-      state.account?.configured ? api(`/api/users/${encodeURIComponent(uid)}/feeds?branch=feed&page=1`).catch(() => ({ feeds: [] })) : Promise.resolve({ feeds: [] }),
-      state.account?.configured ? api(`/api/users/${encodeURIComponent(uid)}/collections?page=1`).catch(() => ({ collections: [] })) : Promise.resolve({ collections: [] }),
+      api(`/api/users/${encodeURIComponent(uid)}/feeds?branch=feed&page=1`).catch(() => ({ feeds: [] })),
     ]);
     const profile = payload.profile;
     const feeds = remoteFeeds.feeds?.length ? remoteFeeds.feeds : payload.localFeeds || [];
     const ownProfile = String(profile.uid) === String(state.account?.uid);
-    userDialogBody.innerHTML = `<section class="user-detail-hero">${profile.avatar ? `<img src="${escapeHtml(imageUrl(profile.avatar))}" alt="" />` : `<span><i class="ph ph-user"></i></span>`}<h2>${escapeHtml(profile.username)}</h2><p>${escapeHtml(profile.bio || profile.verifyLabel || `UID ${profile.uid}`)}</p><div class="profile-stats"><span><strong>${compactNumber(profile.followers)}</strong><small>粉丝</small></span><span><strong>${compactNumber(profile.following)}</strong><small>关注</small></span><span><strong>${compactNumber(profile.feeds)}</strong><small>动态</small></span><span><strong>${compactNumber(profile.likes)}</strong><small>获赞</small></span></div>${!ownProfile ? `<button class="btn ${profile.followed ? "secondary active" : "primary"}" style="margin-top:16px" type="button" data-user-follow="${escapeHtml(profile.uid)}" data-followed="${profile.followed ? "1" : "0"}"><i class="ph ph-${profile.followed ? "check" : "user-plus"}"></i>${profile.followed ? "已关注" : "关注"}</button>` : ""}</section><section class="detail-section"><h3>${remoteFeeds.feeds?.length ? "最新动态" : "本站已归档动态"}</h3>${feedStream(feeds, { compact: true })}</section>${collectionPayload.collections?.length ? `<section class="detail-section"><h3>公开收藏单</h3>${collectionCards(collectionPayload.collections)}</section>` : ""}`;
+    const tabs = [["feed", "动态"], ["htmlFeed", "文章"], ["questionAndAnswer", "问答"], ["collections", "收藏"], ["followList", "关注"], ["fansList", "粉丝"]];
+    userDialogBody.innerHTML = `<section class="user-detail-hero">${profile.avatar ? `<img src="${escapeHtml(imageUrl(profile.avatar))}" alt="${escapeHtml(profile.username)}" />` : `<span><i class="ph ph-user"></i></span>`}<h2>${escapeHtml(profile.username)}</h2><p>${escapeHtml(profile.bio || profile.verifyLabel || `UID ${profile.uid}`)}</p><div class="profile-stats"><span><strong>${compactNumber(profile.followers)}</strong><small>粉丝</small></span><span><strong>${compactNumber(profile.following)}</strong><small>关注</small></span><span><strong>${compactNumber(profile.feeds)}</strong><small>动态</small></span><span><strong>${compactNumber(profile.likes)}</strong><small>获赞</small></span></div>${!ownProfile ? `<button class="btn ${profile.followed ? "secondary active" : "primary"}" style="margin-top:16px" type="button" data-user-follow="${escapeHtml(profile.uid)}" data-followed="${profile.followed ? "1" : "0"}"><i class="ph ph-${profile.followed ? "check" : "user-plus"}"></i>${profile.followed ? "已关注" : "关注"}</button>` : ""}</section><nav class="detail-tabs" aria-label="用户主页内容">${tabs.map(([key, label], index) => `<button class="${index === 0 ? "active" : ""}" type="button" data-user-section="${key}" data-user-section-uid="${escapeHtml(profile.uid)}">${label}</button>`).join("")}</nav><section class="detail-section" id="userSectionRegion"><h3>${remoteFeeds.feeds?.length ? "最新动态" : "本站已归档动态"}</h3>${feedStream(feeds, { compact: true })}</section>`;
   } catch (error) {
     userDialogBody.innerHTML = emptyState("warning-circle", "用户主页加载失败", error.message);
+  }
+}
+
+async function loadUserSection(button) {
+  const uid = button.dataset.userSectionUid;
+  const section = button.dataset.userSection;
+  const region = $("#userSectionRegion");
+  if (!uid || !section || !region) return;
+  $$("[data-user-section]", userDialogBody).forEach((item) => item.classList.toggle("active", item === button));
+  region.innerHTML = skeletonFeeds(2);
+  button.disabled = true;
+  try {
+    let payload;
+    let content;
+    if (section === "collections") {
+      payload = await api(`/api/users/${encodeURIComponent(uid)}/collections?page=1`);
+      content = collectionCards(payload.collections || []);
+    } else if (section === "followList" || section === "fansList") {
+      payload = await api(`/api/users/${encodeURIComponent(uid)}/connections?type=${section}&page=1`);
+      content = userCards(payload.users || []);
+    } else {
+      payload = await api(`/api/users/${encodeURIComponent(uid)}/feeds?branch=${section}&page=1`);
+      content = feedStream(payload.feeds || [], { compact: true });
+    }
+    const labels = { feed: "动态", htmlFeed: "文章", questionAndAnswer: "问答", collections: "收藏", followList: "关注", fansList: "粉丝" };
+    region.innerHTML = `<h3>${labels[section] || "公开内容"}</h3>${content}`;
+  } catch (error) {
+    region.innerHTML = emptyState("warning-circle", "内容加载失败", error.message);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -961,20 +1021,22 @@ async function openCollection(id) {
 
 function openComposer(type = "feed", id = "", title = "") {
   if (!state.account?.configured) {
-    closeDialog(feedDialog);
-    location.hash = "#/account";
-    toast("连接酷安账号后即可发布和回复");
-    return;
+    return routeToAccount("连接酷安账号后即可发布和回复");
   }
+  clearTimeout(composeDraftTimer);
   state.compose.previewUrls?.forEach((url) => URL.revokeObjectURL(url));
-  state.compose = { type, id: String(id || ""), title: String(title || ""), files: [], previewUrls: [] };
+  const draftKey = `coolweb:draft:${state.account.uid}:${type}:${String(id || "new")}`;
+  let draft = null;
+  try { draft = JSON.parse(localStorage.getItem(draftKey) || "null"); } catch { draft = null; }
+  state.compose = { type, id: String(id || ""), title: String(title || ""), files: [], previewUrls: [], draftKey };
   const isFeed = type === "feed";
   $("#composeTitle").textContent = isFeed ? "发布动态" : title || "回复动态";
   $("#composeSubtitle").textContent = isFeed ? "分享到酷安社区" : "回复将直接发布到当前会话";
-  $("#composeMessage").value = "";
+  $("#composeMessage").value = typeof draft?.message === "string" ? draft.message : "";
   $("#composeImages").value = "";
   $("#composeMediaPreview").innerHTML = "";
-  $("#composeCount").textContent = "0";
+  $("#composeCount").textContent = String($("#composeMessage").value.length);
+  $("#composeDraftStatus").textContent = draft?.message ? "已恢复上次未发布的草稿" : "内容会自动保存为本地草稿";
   $("#composeStatus").textContent = isFeed ? "支持 #话题# 与 @酷友" : "请输入回复内容";
   showDialog(composeDialog);
   setTimeout(() => $("#composeMessage").focus(), 80);
@@ -991,6 +1053,42 @@ function fileDataUrl(file) {
 
 function renderComposeMedia() {
   $("#composeMediaPreview").innerHTML = state.compose.files.map((file, index) => `<div><img src="${escapeHtml(state.compose.previewUrls[index])}" alt="${escapeHtml(file.name)}" /><button type="button" data-remove-compose-image="${index}" aria-label="移除图片"><i class="ph ph-x"></i></button></div>`).join("");
+  $("#composeDropZone").classList.toggle("has-media", state.compose.files.length > 0);
+}
+
+function saveComposeDraft(draftKey = state.compose.draftKey, message = $("#composeMessage").value) {
+  if (!draftKey) return;
+  if (message.trim()) {
+    localStorage.setItem(draftKey, JSON.stringify({ message, savedAt: new Date().toISOString() }));
+    if (state.compose.draftKey === draftKey) $("#composeDraftStatus").textContent = "草稿已自动保存";
+  } else {
+    localStorage.removeItem(draftKey);
+    if (state.compose.draftKey === draftKey) $("#composeDraftStatus").textContent = "内容会自动保存为本地草稿";
+  }
+}
+
+function addComposeFiles(fileList) {
+  const incoming = [...(fileList || [])];
+  const candidates = incoming.filter((file) => /^image\/(?:png|jpe?g|webp|gif)$/i.test(file.type) && file.size <= 10 * 1024 * 1024);
+  const files = [...state.compose.files, ...candidates].slice(0, 9);
+  state.compose.previewUrls?.forEach((url) => URL.revokeObjectURL(url));
+  state.compose.files = files;
+  state.compose.previewUrls = files.map((file) => URL.createObjectURL(file));
+  renderComposeMedia();
+  if (candidates.length !== incoming.length) toast("已跳过格式不支持或超过 10MB 的图片", "error");
+  if (state.compose.files.length >= 9 && candidates.length) $("#composeStatus").textContent = "已达到 9 张图片上限";
+}
+
+function insertComposeToken(type) {
+  const textarea = $("#composeMessage");
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const token = type === "mention" ? "@酷友 " : "#话题# ";
+  textarea.setRangeText(token, start, end, "end");
+  if (type === "mention") textarea.setSelectionRange(start + 1, start + 3);
+  else textarea.setSelectionRange(start + 1, start + 3);
+  textarea.focus();
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 async function submitComposer(event) {
@@ -1000,6 +1098,8 @@ async function submitComposer(event) {
     $("#composeStatus").textContent = "请输入内容";
     return;
   }
+  clearTimeout(composeDraftTimer);
+  saveComposeDraft(state.compose.draftKey, $("#composeMessage").value);
   const button = $("#submitCompose");
   button.disabled = true;
   button.innerHTML = `<i class="ph ph-circle-notch"></i>正在发送`;
@@ -1021,6 +1121,8 @@ async function submitComposer(event) {
         ? `/api/replies/${encodeURIComponent(context.id)}/replies`
         : `/api/feeds/${encodeURIComponent(context.id)}/replies`;
     await api(path, { method: "POST", body: JSON.stringify({ message, pictures }) });
+    clearTimeout(composeDraftTimer);
+    if (context.draftKey) localStorage.removeItem(context.draftKey);
     toast(context.type === "feed" ? "动态发布成功" : "回复发布成功", "success");
     closeDialog(composeDialog);
     if (context.type !== "feed" && state.activeFeedId) await openFeed(state.activeFeedId);
@@ -1036,9 +1138,7 @@ async function submitComposer(event) {
 
 async function toggleInteraction(button, path, property, next) {
   if (!state.account?.configured) {
-    location.hash = "#/account";
-    toast("连接酷安账号后即可进行互动");
-    return;
+    return routeToAccount("连接酷安账号后即可进行互动");
   }
   button.disabled = true;
   try {
@@ -1049,6 +1149,15 @@ async function toggleInteraction(button, path, property, next) {
     if (icon) icon.className = `ph${payload[property] ? "-fill" : ""} ph-${property === "followed" ? "check" : "thumbs-up"}`;
     if (property === "followed") {
       button.innerHTML = `<i class="ph ph-${payload.followed ? "check" : "user-plus"}"></i>${payload.followed ? "已关注" : "关注"}`;
+    } else {
+      const count = $("[data-interaction-count]", button);
+      if (count) {
+        const current = Number(count.dataset.count || 0);
+        const nextCount = Math.max(0, current + (payload[property] ? 1 : -1));
+        count.dataset.count = String(nextCount);
+        count.textContent = compactNumber(nextCount);
+      }
+      button.setAttribute("aria-label", payload[property] ? "取消点赞" : "点赞");
     }
     toast(payload.message || "操作成功", "success");
   } catch (error) {
@@ -1060,15 +1169,44 @@ async function toggleInteraction(button, path, property, next) {
 
 async function openFeedAux(id, type) {
   const labels = { likes: "点赞用户", forwards: "转发记录", history: "编辑历史" };
-  const original = feedDialogBody.innerHTML;
   feedDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取${labels[type] || "相关信息"}…</span></div>`;
   try {
     const payload = await api(`/api/feeds/${encodeURIComponent(id)}/${type}?page=1`);
     const content = payload.users?.length ? userCards(payload.users) : payload.feeds?.length ? feedStream(payload.feeds, { compact: true }) : payload.items?.length ? `<div class="history-list">${payload.items.map((item) => `<article><small>${formatDate(item.createdAt)}</small><p>${escapeHtml(stripHtml(item.message))}</p></article>`).join("")}</div>` : emptyState("tray", "暂无记录", "当前没有返回相关数据。");
     feedDialogBody.innerHTML = `<button class="detail-back" type="button" data-feed="${escapeHtml(id)}"><i class="ph ph-arrow-left"></i>返回动态详情</button><section class="detail-section"><h3>${labels[type]}</h3>${content}</section>`;
   } catch (error) {
-    feedDialogBody.innerHTML = `${emptyState("warning-circle", "加载失败", error.message)}<button class="btn secondary" type="button" data-feed="${escapeHtml(id)}">返回详情</button>`;
-    if (!state.account?.configured) feedDialogBody.innerHTML = original;
+    const accountAction = error.message.includes("账号") || error.message.includes("登录") || error.message.includes("会话")
+      ? `<button class="btn primary" type="button" data-account-required>连接账号</button>`
+      : "";
+    feedDialogBody.innerHTML = `${emptyState("warning-circle", `${labels[type] || "相关信息"}加载失败`, error.message, accountAction)}<button class="btn secondary detail-back" type="button" data-feed="${escapeHtml(id)}"><i class="ph ph-arrow-left"></i>返回动态详情</button>`;
+  }
+}
+
+async function shareFeed(button) {
+  const url = button.dataset.shareUrl || `https://www.coolapk.com/feed/${button.dataset.shareFeed}`;
+  const title = button.dataset.shareTitle || "酷安动态";
+  try {
+    if (navigator.share && matchMedia("(pointer: coarse)").matches) {
+      await navigator.share({ title, url });
+      return;
+    }
+    const value = `${title}\n${url}`;
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "");
+      textarea.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+      document.body.append(textarea);
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+      if (!copied) throw new Error("copy failed");
+    }
+    toast("动态标题和链接已复制", "success");
+  } catch (error) {
+    if (error?.name !== "AbortError") toast("复制失败，请从动态详情打开网页版", "error");
   }
 }
 
@@ -1120,7 +1258,9 @@ async function saveRule(event) {
   if (!topic) return;
   const mode = $('input[name="ruleMode"]:checked', ruleDialog)?.value || "ai";
   const status = $("#ruleStatus");
+  const button = $('button[type="submit"]', event.currentTarget);
   status.textContent = "正在保存…";
+  button.disabled = true;
   try {
     const payload = {
       ai: {
@@ -1141,6 +1281,8 @@ async function saveRule(event) {
     setTimeout(() => closeDialog(ruleDialog), 450);
   } catch (error) {
     status.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1238,8 +1380,12 @@ document.addEventListener("click", async (event) => {
   if (target.matches("[data-app]")) openApp(target.dataset.app);
   if (target.matches("[data-public-topic]")) openTopic(target.dataset.publicTopic);
   if (target.matches("[data-user]")) openUser(target.dataset.user);
+  if (target.matches("[data-user-section]")) loadUserSection(target);
   if (target.matches("[data-collection]")) openCollection(target.dataset.collection);
   if (target.matches("[data-image]")) openLightbox(target.dataset.image, target.dataset.caption);
+  if (target.matches("[data-share-feed]")) shareFeed(target);
+  if (target.matches("[data-account-required]")) routeToAccount();
+  if (target.matches("[data-compose-insert]")) insertComposeToken(target.dataset.composeInsert);
   if (target.matches("[data-remove-compose-image]")) {
     const index = Number(target.dataset.removeComposeImage);
     URL.revokeObjectURL(state.compose.previewUrls[index]);
@@ -1265,7 +1411,7 @@ document.addEventListener("click", async (event) => {
     toggleInteraction(target, `/api/interactions/topics/${encodeURIComponent(target.dataset.topicFollow)}/follow`, "followed", next);
   }
   if (target.matches("[data-collection-action]")) {
-    if (!state.account?.configured) return void (location.hash = "#/account");
+    if (!state.account?.configured) return routeToAccount("连接酷安账号后即可管理收藏单");
     const enabled = target.dataset.enabled !== "1";
     target.disabled = true;
     try {
@@ -1310,6 +1456,7 @@ document.addEventListener("click", async (event) => {
   if (target.matches("[data-rule-topic]")) openRule(target.dataset.ruleTopic);
   if (target.matches("[data-remove-topic]")) removeTopic(target.dataset.removeTopic);
   if (target.matches("[data-monitor-refresh]")) {
+    const original = target.innerHTML;
     target.disabled = true;
     target.innerHTML = `<i class="ph ph-circle-notch"></i>抓取中`;
     try {
@@ -1320,7 +1467,11 @@ document.addEventListener("click", async (event) => {
       await route({ force: true });
     } catch (error) {
       toast(error.message, "error");
-      target.disabled = false;
+    } finally {
+      if (target.isConnected) {
+        target.disabled = false;
+        target.innerHTML = original;
+      }
     }
   }
   if (target.matches("[data-ai-status]")) {
@@ -1361,7 +1512,9 @@ viewHost.addEventListener("submit", async (event) => {
   if (event.target.matches("#settingsForm")) {
     event.preventDefault();
     const status = $("#settingsSaveStatus");
+    const button = $('button[type="submit"]', event.target);
     status.textContent = "正在保存…";
+    button.disabled = true;
     try {
       state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify(settingsPayload()) });
       status.textContent = "设置已保存";
@@ -1370,6 +1523,8 @@ viewHost.addEventListener("submit", async (event) => {
     } catch (error) {
       status.textContent = error.message;
       toast(error.message, "error");
+    } finally {
+      button.disabled = false;
     }
   }
   if (event.target.matches("#accountForm")) {
@@ -1525,18 +1680,33 @@ function applyTheme(theme) {
 $("#themeToggle").addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
 $("#composeTrigger").addEventListener("click", () => openComposer("feed"));
 $("#composeForm").addEventListener("submit", submitComposer);
+let composeDraftTimer = null;
 $("#composeMessage").addEventListener("input", (event) => {
   $("#composeCount").textContent = String(event.target.value.length);
+  $("#composeCount").parentElement.classList.toggle("near-limit", event.target.value.length >= 9000);
+  clearTimeout(composeDraftTimer);
+  $("#composeDraftStatus").textContent = "正在保存草稿…";
+  const draftKey = state.compose.draftKey;
+  const draftMessage = event.target.value;
+  composeDraftTimer = setTimeout(() => saveComposeDraft(draftKey, draftMessage), 350);
 });
 $("#composeImages").addEventListener("change", (event) => {
-  const candidates = [...event.target.files].filter((file) => /^image\/(?:png|jpe?g|webp|gif)$/i.test(file.type) && file.size <= 10 * 1024 * 1024);
-  const files = [...state.compose.files, ...candidates].slice(0, 9);
-  state.compose.previewUrls?.forEach((url) => URL.revokeObjectURL(url));
-  state.compose.files = files;
-  state.compose.previewUrls = files.map((file) => URL.createObjectURL(file));
-  renderComposeMedia();
-  if (candidates.length !== event.target.files.length) toast("已跳过格式不支持或超过 10MB 的图片", "error");
+  addComposeFiles(event.target.files);
   event.target.value = "";
+});
+const composeDropZone = $("#composeDropZone");
+["dragenter", "dragover"].forEach((type) => composeDropZone.addEventListener(type, (event) => {
+  event.preventDefault();
+  composeDropZone.classList.add("dragging");
+}));
+["dragleave", "drop"].forEach((type) => composeDropZone.addEventListener(type, (event) => {
+  event.preventDefault();
+  composeDropZone.classList.remove("dragging");
+  if (type === "drop") addComposeFiles(event.dataTransfer?.files);
+}));
+$("#composeMessage").addEventListener("paste", (event) => {
+  const files = [...(event.clipboardData?.files || [])];
+  if (files.length) addComposeFiles(files);
 });
 ruleDialog.addEventListener("change", (event) => { if (event.target.name === "ruleMode") syncRuleMode(); });
 $("#ruleForm").addEventListener("submit", saveRule);
@@ -1566,6 +1736,11 @@ lightboxStage.addEventListener("pointerup", () => {
   state.lightbox.dragging = false;
   lightboxStage.classList.remove("dragging");
 });
+lightboxStage.addEventListener("pointercancel", () => {
+  state.lightbox.dragging = false;
+  lightboxStage.classList.remove("dragging");
+});
+lightboxStage.addEventListener("dblclick", () => setZoom(state.lightbox.zoom === 1 ? 2 : 1));
 
 document.addEventListener("error", (event) => {
   if (event.target instanceof HTMLImageElement) {
