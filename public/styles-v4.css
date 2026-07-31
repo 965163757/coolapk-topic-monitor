@@ -1775,6 +1775,55 @@ dialog::backdrop {
   animation: dialog-in-v4 var(--duration-enter) var(--ease-out);
 }
 
+/* Keep data-heavy detail surfaces at a stable size while async content arrives.
+   This prevents the centered dialog from jumping between the loading and result
+   layouts, and reserves the scrollbar gutter so topic sorting stays still. */
+.feed-dialog,
+.app-dialog,
+.topic-dialog,
+.user-dialog,
+.collection-dialog {
+  height: min(900px, calc(100vh - 34px));
+  height: min(900px, calc(100dvh - 34px));
+}
+
+.feed-dialog[open],
+.app-dialog[open],
+.topic-dialog[open],
+.user-dialog[open],
+.collection-dialog[open] {
+  animation: none;
+}
+
+.feed-dialog .dialog-body,
+.app-dialog .dialog-body,
+.topic-dialog .dialog-body,
+.user-dialog .dialog-body,
+.collection-dialog .dialog-body {
+  height: calc(100% - 66px);
+  max-height: none;
+  scrollbar-gutter: stable;
+}
+
+.feed-dialog .dialog-loading,
+.app-dialog .dialog-loading,
+.topic-dialog .dialog-loading,
+.user-dialog .dialog-loading,
+.collection-dialog .dialog-loading {
+  min-height: 100%;
+}
+
+#topicFeedRegion {
+  position: relative;
+  min-height: 180px;
+  transition: opacity var(--duration-ui) ease;
+}
+
+#topicFeedRegion.is-refreshing {
+  opacity: .52;
+  pointer-events: none;
+}
+
 .dialog-bar {
   min-height: 66px;
   padding: 0 18px;
@@ -2486,6 +2535,15 @@ img.image-ready {
     max-height: calc(100dvh - 10px);
     margin: auto 0 0;
     border-radius: 20px 20px 0 0;
+  }
+
+  .feed-dialog,
+  .app-dialog,
+  .topic-dialog,
+  .user-dialog,
+  .collection-dialog {
+    height: calc(100vh - 10px);
+    height: calc(100dvh - 10px);
   }
 
   .dialog-body {

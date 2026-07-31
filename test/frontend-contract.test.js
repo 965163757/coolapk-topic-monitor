@@ -257,6 +257,14 @@ test("styles-v4 uses scoped transitions and honors responsive motion preferences
   assert.doesNotMatch(withoutComments, /\btransition\s*:\s*all\b/i, "avoid transition: all; enumerate animated properties");
   assert.match(withoutComments, /@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)/i);
   assert.match(withoutComments, /\.settings-fields\s+\.toggle-row\s*>\s*input[\s\S]*?width\s*:\s*1px/i, "hidden settings toggles must not widen the page");
+  assert.match(withoutComments, /\.topic-dialog[\s\S]*?height\s*:\s*min\(900px,\s*calc\(100dvh\s*-\s*34px\)\)/i, "topic detail must reserve a stable desktop height");
+  assert.match(withoutComments, /\.topic-dialog\[open\][\s\S]*?animation\s*:\s*none/i, "topic detail must not replay a modal entrance animation");
+  assert.match(withoutComments, /#topicFeedRegion\.is-refreshing[\s\S]*?pointer-events\s*:\s*none/i, "topic sorting needs a stable in-place loading state");
+  const topicRefreshCode = appJs.slice(appJs.indexOf("async function loadTopicContent"), appJs.indexOf("async function openUser"));
+  assert.match(topicRefreshCode, /region\.classList\.add\(["']is-refreshing["']\)/, "topic sorting must preserve existing content while refreshing");
+  assert.doesNotMatch(topicRefreshCode, /region\.innerHTML\s*=\s*skeletonFeeds/i, "topic sorting must not collapse to a short skeleton");
+  assert.match(appJs, /topicDialogBody\.scrollTop\s*=\s*0/, "opening a topic must reset the previous detail scroll position");
+  assert.match(appJs, /detailRequests:\s*\{\s*feed:\s*0,\s*app:\s*0,\s*topic:\s*0,\s*user:\s*0,\s*collection:\s*0\s*\}/, "detail dialogs need independent stale-request guards");
 
   const maxWidths = [...withoutComments.matchAll(/@media[^{]*\(\s*max-width\s*:\s*(\d+(?:\.\d+)?)px\s*\)/gi)]
     .map((match) => Number(match[1]));

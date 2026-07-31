@@ -39,7 +39,7 @@ const state = {
   home: { channel: "home", page: 1, feeds: [], supportingData: null, requestId: 0, loading: false },
   channelPage: { source: "", page: 1, data: null, requestId: 0 },
   topicDetail: { source: "", sort: "dateline_desc", page: 1, feeds: [], requestId: 0 },
-  detailRequests: { topic: 0 },
+  detailRequests: { feed: 0, app: 0, topic: 0, user: 0, collection: 0 },
   discover: { mode: "recent", page: 1, feeds: [] },
   monitor: {
     topic: "__all__",
@@ -1413,15 +1413,18 @@ function renderSearchTab(tab) {
 
 async function openFeed(id) {
   if (!id) return;
+  const requestId = ++state.detailRequests.feed;
   state.activeFeedId = String(id);
   state.feedReplyPage = 1;
+  feedDialogBody.scrollTop = 0;
   feedDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取动态与评论…</span></div>`;
   showDialog(feedDialog);
   try {
     const payload = await api(`/api/feeds/${encodeURIComponent(id)}?page=1`);
-    if (state.activeFeedId !== String(id)) return;
+    if (requestId !== state.detailRequests.feed || state.activeFeedId !== String(id) || !feedDialog.open) return;
     renderFeedDetail(payload);
   } catch (error) {
+    if (requestId !== state.detailRequests.feed) return;
     feedDialogBody.innerHTML = emptyState("warning-circle", "详情加载失败", error.message, `<button class="btn primary" type="button" data-feed="${escapeHtml(id)}">重新加载</button>`);
   }
 }
@@ -1466,10 +1469,13 @@ async function loadMoreReplies() {
 
 async function openApp(id) {
   if (!id) return;
+  const requestId = ++state.detailRequests.app;
+  appDialogBody.scrollTop = 0;
   appDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取应用详情…</span></div>`;
   showDialog(appDialog);
   try {
     const payload = await api(`/api/apps/${encodeURIComponent(id)}`);
+    if (requestId !== state.detailRequests.app || !appDialog.open) return;
     const app = payload.app;
     const screenshotGroup = `app:${app.id}`;
     state.imageGroups.set(screenshotGroup, app.screenshots || []);
@@ -1477,6 +1483,7 @@ async function openApp(id) {
     const appUrl = `coolmarket://apk/${encodeURIComponent(app.packageName || app.id)}`;
     appDialogBody.innerHTML = `<section class="app-detail-hero">${app.logo ? imageMarkup(app.logo, { alt: app.title, width: 192, quality: 78 }) : `<span class="app-logo-placeholder"><i class="ph ph-app-window"></i></span>`}<div><h2>${escapeHtml(app.title)}</h2><p>${escapeHtml(app.subtitle || app.packageName)}</p><div class="app-detail-stats"><span><strong>${Number(app.score || 0).toFixed(1)}</strong><small>酷友评分</small></span><span><strong>${escapeHtml(app.version || "—")}</strong><small>最新版本</small></span><span><strong>${escapeHtml(app.size || "—")}</strong><small>安装包</small></span><span><strong>${compactNumber(app.downloads)}</strong><small>下载</small></span></div><div class="detail-actions"><a class="btn primary" href="${escapeHtml(appUrl)}"><i class="ph ph-device-mobile"></i>酷安 App 打开</a><a class="btn secondary" href="${escapeHtml(webUrl)}" target="_blank" rel="noreferrer"><i class="ph ph-browser"></i>网页版</a></div></div></section>${app.packageName ? `<section class="detail-facts"><span><b>包名</b>${escapeHtml(app.packageName)}</span><span><b>开发者</b>${escapeHtml(app.developer || "—")}</span><span><b>分类</b>${escapeHtml(app.category || "—")}</span><span><b>更新时间</b>${escapeHtml(app.updatedAt ? formatDate(app.updatedAt) : "—")}</span></section>` : ""}${app.description ? `<section class="detail-section"><h3>应用介绍</h3><p>${escapeHtml(stripHtml(app.description))}</p></section>` : ""}${app.changelog ? `<section class="detail-section"><h3>更新说明</h3><p>${escapeHtml(stripHtml(app.changelog))}</p></section>` : ""}${app.permissions?.length ? `<section class="detail-section"><h3>应用权限</h3><div class="permission-list">${app.permissions.map((permission) => `<span><i class="ph ph-shield-check"></i>${escapeHtml(permission)}</span>`).join("")}</div></section>` : ""}${app.screenshots?.length ? `<section class="detail-section"><h3>应用截图</h3><div class="screenshots">${app.screenshots.map((picture, index) => `<button type="button" data-image="${escapeHtml(picture)}" data-image-group="${escapeHtml(screenshotGroup)}" data-image-index="${index}" data-caption="${escapeHtml(app.title)}" aria-label="放大应用截图 ${index + 1}">${imageMarkup(picture, { alt: `应用截图 ${index + 1}`, width: 720, quality: 78 })}</button>`).join("")}</div></section>` : ""}<section class="detail-section"><h3>相关动态</h3>${feedStream(payload.feeds, { compact: true })}</section>`;
   } catch (error) {
+    if (requestId !== state.detailRequests.app) return;
     appDialogBody.innerHTML = emptyState("warning-circle", "应用详情加载失败", error.message);
   }
 }
@@ -1485,6 +1492,7 @@ async function openTopic(value) {
   const source = publicSourceKey(value);
   if (!source) return;
   const requestId = ++state.detailRequests.topic;
+  topicDialogBody.scrollTop = 0;
   topicDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取话题详情…</span></div>`;
   showDialog(topicDialog);
   try {
@@ -1514,7 +1522,10 @@ async function loadTopicContent(sort = state.topicDetail.sort, { append = false 
     button.classList.toggle("active", active);
     button.disabled = true;
   });
-  if (!append) region.innerHTML = skeletonFeeds(2);
+  if (!append) {
+    region.classList.add("is-refreshing");
+    region.setAttribute("aria-busy", "true");
+  }
   if (more) {
     delete more.dataset.retrySort;
     delete more.dataset.retryAppend;
@@ -1542,7 +1553,11 @@ async function loadTopicContent(sort = state.topicDetail.sort, { append = false 
     }
   } catch (error) {
     if (requestId !== state.detailRequests.topic) return;
-    if (!append) region.innerHTML = `<div class="inline-error">${escapeHtml(error.message)}</div>`;
+    if (!append) {
+      $$("[data-topic-sort]", topicDialogBody).forEach((button) => {
+        button.classList.toggle("active", button.dataset.topicSort === state.topicDetail.sort);
+      });
+    }
     toast(error.message, "error");
     if (more) {
       more.disabled = false;
@@ -1552,6 +1567,8 @@ async function loadTopicContent(sort = state.topicDetail.sort, { append = false 
     }
   } finally {
     if (requestId === state.detailRequests.topic) {
+      region.classList.remove("is-refreshing");
+      region.removeAttribute("aria-busy");
       $$("[data-topic-sort]", topicDialogBody).forEach((button) => { button.disabled = false; });
     }
   }
@@ -1562,6 +1579,8 @@ async function openUser(uid) {
     toast("该动态没有提供可用的用户 UID", "error");
     return;
   }
+  const requestId = ++state.detailRequests.user;
+  userDialogBody.scrollTop = 0;
   userDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取用户公开主页…</span></div>`;
   showDialog(userDialog);
   try {
@@ -1569,12 +1588,14 @@ async function openUser(uid) {
       api(`/api/users/${encodeURIComponent(uid)}`),
       api(`/api/users/${encodeURIComponent(uid)}/feeds?branch=feed&page=1`).catch(() => ({ feeds: [] })),
     ]);
+    if (requestId !== state.detailRequests.user || !userDialog.open) return;
     const profile = payload.profile;
     const feeds = remoteFeeds.feeds?.length ? remoteFeeds.feeds : payload.localFeeds || [];
     const ownProfile = String(profile.uid) === String(state.account?.uid);
     const tabs = [["feed", "动态"], ["htmlFeed", "文章"], ["questionAndAnswer", "问答"], ["collections", "收藏"], ["followList", "关注"], ["fansList", "粉丝"]];
     userDialogBody.innerHTML = `<section class="user-detail-hero">${profile.avatar ? imageMarkup(profile.avatar, { alt: profile.username, width: 192, quality: 78 }) : `<span><i class="ph ph-user"></i></span>`}<h2>${escapeHtml(profile.username)}</h2><p>${escapeHtml(profile.bio || profile.verifyLabel || `UID ${profile.uid}`)}</p><div class="profile-stats"><span><strong>${compactNumber(profile.followers)}</strong><small>粉丝</small></span><span><strong>${compactNumber(profile.following)}</strong><small>关注</small></span><span><strong>${compactNumber(profile.feeds)}</strong><small>动态</small></span><span><strong>${compactNumber(profile.likes)}</strong><small>获赞</small></span></div>${!ownProfile ? `<button class="btn ${profile.followed ? "secondary active" : "primary"}" style="margin-top:16px" type="button" data-user-follow="${escapeHtml(profile.uid)}" data-followed="${profile.followed ? "1" : "0"}"><i class="ph ph-${profile.followed ? "check" : "user-plus"}"></i>${profile.followed ? "已关注" : "关注"}</button>` : ""}</section><nav class="detail-tabs" aria-label="用户主页内容">${tabs.map(([key, label], index) => `<button class="${index === 0 ? "active" : ""}" type="button" data-user-section="${key}" data-user-section-uid="${escapeHtml(profile.uid)}">${label}</button>`).join("")}</nav><section class="detail-section" id="userSectionRegion"><h3>${remoteFeeds.feeds?.length ? "最新动态" : "本站已归档动态"}</h3>${feedStream(feeds, { compact: true })}</section>`;
   } catch (error) {
+    if (requestId !== state.detailRequests.user) return;
     userDialogBody.innerHTML = emptyState("warning-circle", "用户主页加载失败", error.message);
   }
 }
@@ -1616,13 +1637,17 @@ async function loadUserSection(button) {
 
 async function openCollection(id) {
   if (!id) return;
+  const requestId = ++state.detailRequests.collection;
+  collectionDialogBody.scrollTop = 0;
   collectionDialogBody.innerHTML = `<div class="dialog-loading"><i class="ph ph-circle-notch"></i><span>正在读取收藏单…</span></div>`;
   showDialog(collectionDialog);
   try {
     const payload = await api(`/api/collections/${encodeURIComponent(id)}?page=1`);
+    if (requestId !== state.detailRequests.collection || !collectionDialog.open) return;
     const item = payload.collection;
     collectionDialogBody.innerHTML = `<section class="collection-detail-hero">${item.cover ? imageMarkup(item.cover, { width: 360, quality: 78 }) : `<span><i class="ph ph-bookmarks"></i></span>`}<div><small>酷安收藏单</small><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(stripHtml(item.description || item.subtitle || ""))}</p><div class="detail-actions"><button class="btn ${item.followed ? "secondary active" : "primary"}" type="button" data-collection-action="${escapeHtml(item.id)}" data-action="follow" data-enabled="${item.followed ? "1" : "0"}"><i class="ph ph-user-plus"></i>${item.followed ? "已关注" : "关注收藏单"}</button><button class="btn secondary ${item.liked ? "active" : ""}" type="button" data-collection-action="${escapeHtml(item.id)}" data-action="like" data-enabled="${item.liked ? "1" : "0"}"><i class="ph ph-thumbs-up"></i>${item.liked ? "已赞" : "点赞"}</button></div></div></section>${payload.feeds?.length ? `<section class="detail-section"><h3>收藏动态</h3>${feedStream(payload.feeds, { compact: true })}</section>` : ""}${payload.apps?.length ? `<section class="detail-section"><h3>收藏应用</h3>${appGrid(payload.apps)}</section>` : ""}`;
   } catch (error) {
+    if (requestId !== state.detailRequests.collection) return;
     collectionDialogBody.innerHTML = emptyState("warning-circle", "收藏单加载失败", error.message);
   }
 }
