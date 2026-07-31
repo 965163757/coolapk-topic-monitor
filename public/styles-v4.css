@@ -602,7 +602,7 @@ body.rail-collapsed .workspace {
   border-radius: 18px;
   background: var(--surface);
   box-shadow: var(--shadow-md);
-  animation: loading-float 1.6s ease-in-out infinite;
+  animation: none;
 }
 
 .page-loading h1 {
@@ -1309,7 +1309,7 @@ body.rail-collapsed .workspace {
   border-radius: 50%;
   background: var(--green);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 10%, transparent);
-  animation: status-breathe 2s ease-in-out infinite;
+  animation: none;
 }
 
 .home-monitor-head > a {
@@ -1856,7 +1856,7 @@ dialog::backdrop {
 img[data-lazy-src],
 img[data-carousel-src] {
   background: var(--surface-2);
-  animation: image-pulse 1.2s ease-in-out infinite;
+  animation: none;
 }
 
 img.image-ready {
@@ -1864,8 +1864,7 @@ img.image-ready {
 }
 
 .skeleton::after {
-  opacity: .65;
-  animation-duration: 1.6s;
+  display: none;
 }
 
 .toggle-row > span,
